@@ -1,0 +1,1150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Drift — A Micro-Ecosystem</title>
+<style>
+  :root {
+    --hud-fg: #d8f1ff;
+    --hud-dim: #6c8aa0;
+    --hud-warn: #ff6a6a;
+    --hud-good: #5dffb1;
+    --hud-energy: #ffd76a;
+    --hud-bg: rgba(6, 14, 22, 0.55);
+    --hud-line: rgba(120, 200, 255, 0.18);
+    --font-stack: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #04080d;
+    color: var(--hud-fg);
+    font-family: var(--font-stack);
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  #game-root {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: radial-gradient(ellipse at center, #0b1a2a 0%, #03070d 70%);
+    touch-action: none;
+  }
+
+  #game-root.embed {
+    border-radius: 8px;
+    box-shadow: 0 0 0 1px rgba(120, 200, 255, 0.12) inset;
+  }
+
+  #game-canvas {
+    display: block;
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    cursor: crosshair;
+    touch-action: none;
+  }
+
+  #mobile-controls {
+    display: none;
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 7;
+  }
+
+  .stick-zone {
+    position: absolute;
+    left: 16px;
+    bottom: 18px;
+    width: 144px;
+    height: 144px;
+    border-radius: 50%;
+    pointer-events: auto;
+    touch-action: none;
+    background: radial-gradient(circle at 50% 50%, rgba(140,220,255,0.18), rgba(30,50,70,0.28));
+    border: 1px solid rgba(150,220,255,0.28);
+    box-shadow: 0 0 24px rgba(30,70,120,0.28) inset;
+  }
+
+  .stick-knob {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 62px;
+    height: 62px;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background: linear-gradient(180deg, rgba(180,235,255,0.65), rgba(90,165,210,0.5));
+    border: 1px solid rgba(230,250,255,0.5);
+    box-shadow: 0 2px 14px rgba(10,20,40,0.45);
+  }
+
+  .mob-btn {
+    position: absolute;
+    pointer-events: auto;
+    touch-action: manipulation;
+    width: 78px;
+    height: 78px;
+    border-radius: 50%;
+    border: 1px solid rgba(150,220,255,0.36);
+    color: var(--hud-fg);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-family: var(--font-stack);
+    background: radial-gradient(circle at 30% 30%, rgba(130,200,255,0.38), rgba(18,34,52,0.8));
+    box-shadow: 0 2px 16px rgba(0,0,0,0.45);
+  }
+
+  .mob-btn:active {
+    transform: scale(0.96);
+    background: radial-gradient(circle at 30% 30%, rgba(170,230,255,0.46), rgba(25,48,70,0.92));
+  }
+
+  #mob-dash {
+    right: 18px;
+    bottom: 90px;
+    width: 92px;
+    height: 92px;
+  }
+
+  #mob-pause {
+    right: 96px;
+    bottom: 16px;
+    width: 64px;
+    height: 64px;
+    font-size: 10px;
+  }
+
+  .hud {
+    position: absolute;
+    pointer-events: none;
+    color: var(--hud-fg);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+    font-size: 12px;
+    letter-spacing: 0.04em;
+  }
+
+  #hud-stats {
+    top: 14px;
+    left: 14px;
+    background: var(--hud-bg);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    border: 1px solid var(--hud-line);
+    border-radius: 6px;
+    padding: 10px 12px;
+    min-width: 180px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .stat-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .stat-label {
+    width: 56px;
+    color: var(--hud-dim);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
+
+  .bar-track {
+    flex: 1;
+    height: 6px;
+    background: rgba(255,255,255,0.07);
+    border-radius: 3px;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .bar-fill {
+    height: 100%;
+    width: 100%;
+    border-radius: 3px;
+    transition: width 0.15s linear, background 0.3s;
+  }
+
+  .bar-health .bar-fill { background: linear-gradient(90deg, #ff5a5a, #ff9090); }
+  .bar-energy .bar-fill { background: linear-gradient(90deg, #ffb84d, #ffe278); }
+  .bar-size   .bar-fill { background: linear-gradient(90deg, #5dffb1, #9affd9); }
+
+  .stat-value {
+    width: 32px;
+    text-align: right;
+    color: var(--hud-fg);
+    font-variant-numeric: tabular-nums;
+    font-size: 11px;
+  }
+
+  #hud-biome {
+    top: 110px;
+    left: 14px;
+    text-align: left;
+    background: var(--hud-bg);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    border: 1px solid var(--hud-line);
+    border-radius: 6px;
+    padding: 8px 14px;
+    min-width: 160px;
+  }
+
+  #biome-name {
+    font-size: 13px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--hud-fg);
+  }
+
+  #biome-tier {
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    color: var(--hud-dim);
+    margin-top: 2px;
+  }
+
+  #hud-goals {
+    top: 14px;
+    right: 14px;
+    background: var(--hud-bg);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    border: 1px solid var(--hud-line);
+    border-radius: 6px;
+    padding: 10px 12px;
+    min-width: 220px;
+    max-width: 280px;
+  }
+
+  .goal-title {
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    color: var(--hud-dim);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .goal-item {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-bottom: 8px;
+  }
+
+  .goal-item:last-child { margin-bottom: 0; }
+
+  .goal-text {
+    font-size: 12px;
+    color: var(--hud-fg);
+  }
+
+  .goal-bar-track {
+    height: 3px;
+    background: rgba(255,255,255,0.07);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .goal-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #6ad9ff, #b7ecff);
+    border-radius: 2px;
+    transition: width 0.3s;
+  }
+
+  .goal-item.done .goal-text {
+    color: var(--hud-good);
+    text-decoration: line-through;
+    opacity: 0.6;
+  }
+
+  #hud-warn {
+    bottom: 24%;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 13px;
+    letter-spacing: 0.3em;
+    color: var(--hud-warn);
+    text-transform: uppercase;
+    opacity: 0;
+    transition: opacity 0.2s;
+    text-shadow: 0 0 16px rgba(255, 100, 100, 0.7);
+  }
+
+  #hud-warn.show {
+    opacity: 1;
+    animation: pulse 1s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  #hud-event {
+    top: 112px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--hud-bg);
+    border: 1px solid rgba(255, 200, 120, 0.4);
+    border-radius: 6px;
+    padding: 10px 20px;
+    text-align: center;
+    color: #ffe9b8;
+    opacity: 0;
+    transition: opacity 0.5s;
+    min-width: 280px;
+    max-width: min(80vw, 720px);
+    box-shadow: 0 0 30px rgba(255, 180, 80, 0.15);
+    z-index: 4;
+  }
+
+  #hud-event.show { opacity: 1; }
+
+  #event-title {
+    font-size: 13px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+
+  #event-desc {
+    font-size: 11px;
+    color: var(--hud-dim);
+    letter-spacing: 0.04em;
+  }
+
+  #hud-controls {
+    bottom: 14px;
+    left: 14px;
+    font-size: 10px;
+    color: var(--hud-dim);
+    letter-spacing: 0.1em;
+    line-height: 1.6;
+  }
+
+  #hud-controls kbd {
+    display: inline-block;
+    padding: 1px 5px;
+    border: 1px solid var(--hud-line);
+    border-radius: 3px;
+    background: rgba(20, 30, 45, 0.6);
+    color: var(--hud-fg);
+    font-family: var(--font-stack);
+    font-size: 9px;
+    margin: 0 1px;
+  }
+
+  #hud-meta {
+    bottom: 14px;
+    right: 14px;
+    font-size: 10px;
+    color: var(--hud-dim);
+    text-align: right;
+    letter-spacing: 0.06em;
+  }
+
+  #hud-meta .meta-row { margin-bottom: 2px; }
+  #hud-meta .meta-row b { color: var(--hud-fg); font-weight: normal; }
+
+  #hud-codex {
+    left: 14px;
+    bottom: 62px;
+    background: var(--hud-bg);
+    border: 1px solid var(--hud-line);
+    border-radius: 6px;
+    padding: 8px 10px;
+    min-width: 220px;
+    max-width: 300px;
+    color: var(--hud-dim);
+  }
+  #hud-codex .codex-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 6px;
+  }
+  #hud-codex .codex-body {
+    display: block;
+  }
+  #hud-codex.collapsed .codex-body {
+    display: none;
+  }
+  #codex-toggle {
+    border: 1px solid var(--hud-line);
+    border-radius: 4px;
+    background: rgba(12, 24, 38, 0.7);
+    color: var(--hud-dim);
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    cursor: pointer;
+    font-family: var(--font-stack);
+  }
+  #codex-toggle:hover { color: var(--hud-fg); }
+  #hud-codex .codex-list {
+    margin-top: 6px;
+    font-size: 10px;
+    line-height: 1.35;
+    max-height: 90px;
+    overflow: auto;
+    color: var(--hud-fg);
+    opacity: 0.9;
+  }
+  #hud-codex .codex-count {
+    color: var(--hud-fg);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+  }
+  #hud-codex .codex-recent {
+    font-size: 10px;
+    line-height: 1.3;
+    max-height: 30px;
+    overflow: hidden;
+  }
+
+  /* Overlays */
+  .overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(2, 6, 12, 0.75);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    pointer-events: auto;
+  }
+  .overlay.show { display: flex; }
+
+  .modal {
+    background: linear-gradient(180deg, rgba(14, 24, 38, 0.95), rgba(8, 14, 22, 0.95));
+    border: 1px solid rgba(120, 200, 255, 0.2);
+    border-radius: 10px;
+    padding: 28px 32px;
+    max-width: 760px;
+    width: calc(100% - 40px);
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), 0 0 80px rgba(80, 160, 255, 0.06) inset;
+    color: var(--hud-fg);
+  }
+
+  .modal-title {
+    font-size: 14px;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: var(--hud-dim);
+    text-align: center;
+    margin-bottom: 6px;
+  }
+
+  .modal-subtitle {
+    font-size: 22px;
+    text-align: center;
+    margin-bottom: 24px;
+    letter-spacing: 0.04em;
+  }
+
+  .mutation-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+  }
+
+  .mutation-card {
+    background: rgba(20, 32, 48, 0.55);
+    border: 1px solid rgba(120, 200, 255, 0.18);
+    border-radius: 8px;
+    padding: 18px 16px;
+    cursor: pointer;
+    transition: transform 0.15s, border-color 0.15s, background 0.15s;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .mutation-card:hover {
+    transform: translateY(-3px);
+    border-color: rgba(150, 220, 255, 0.5);
+    background: rgba(30, 50, 70, 0.7);
+  }
+
+  .mutation-icon {
+    width: 60px;
+    height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .mutation-name {
+    font-size: 14px;
+    letter-spacing: 0.08em;
+    color: var(--hud-fg);
+  }
+
+  .mutation-benefit {
+    font-size: 11px;
+    color: var(--hud-good);
+    line-height: 1.4;
+  }
+
+  .mutation-cost {
+    font-size: 11px;
+    color: #ff9090;
+    line-height: 1.4;
+  }
+
+  .mutation-flavor {
+    font-size: 10px;
+    color: var(--hud-dim);
+    font-style: italic;
+    line-height: 1.4;
+    margin-top: 2px;
+  }
+
+  /* Game over */
+  #game-over .modal { max-width: 520px; text-align: center; }
+  .summary-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 18px;
+    margin: 16px 0 24px;
+    font-size: 12px;
+  }
+  .summary-grid .label { color: var(--hud-dim); text-align: right; letter-spacing: 0.06em; }
+  .summary-grid .value { color: var(--hud-fg); text-align: left; font-variant-numeric: tabular-nums; }
+
+  .btn {
+    background: linear-gradient(180deg, #2a4a6a, #1a3050);
+    border: 1px solid rgba(120, 200, 255, 0.3);
+    color: var(--hud-fg);
+    padding: 10px 22px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    font-family: var(--font-stack);
+    transition: background 0.15s, transform 0.1s;
+  }
+  .btn:hover { background: linear-gradient(180deg, #3a5e84, #234166); }
+  .btn:active { transform: translateY(1px); }
+
+  /* Intro */
+  #intro .modal { max-width: 580px; text-align: center; }
+  #intro p { color: var(--hud-dim); font-size: 13px; line-height: 1.6; margin: 12px 0; }
+  #intro .controls-hint {
+    margin: 22px 0;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    color: var(--hud-dim);
+  }
+  #intro .controls-hint kbd {
+    display: inline-block;
+    padding: 2px 7px;
+    border: 1px solid var(--hud-line);
+    border-radius: 3px;
+    background: rgba(20, 30, 45, 0.6);
+    color: var(--hud-fg);
+    font-size: 11px;
+    margin: 0 2px;
+  }
+  .seed-row {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    align-items: center;
+    margin: 18px 0;
+    font-size: 11px;
+    color: var(--hud-dim);
+    letter-spacing: 0.1em;
+  }
+  .seed-row input {
+    background: rgba(10, 20, 32, 0.7);
+    border: 1px solid var(--hud-line);
+    color: var(--hud-fg);
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-family: var(--font-stack);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    width: 160px;
+    text-align: center;
+  }
+  .seed-row input:focus { outline: 1px solid rgba(120, 200, 255, 0.4); }
+
+  .toast {
+    position: absolute;
+    top: 68px;
+    left: 50%;
+    transform: translate(-50%, -8px);
+    background: var(--hud-bg);
+    border: 1px solid var(--hud-line);
+    border-radius: 6px;
+    padding: 10px 16px;
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--hud-fg);
+    opacity: 0;
+    transition: opacity 0.4s, transform 0.4s;
+    pointer-events: none;
+  }
+  .toast.show {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+
+  /* Embed mode tweaks */
+  body.embed #hud-controls { display: none; }
+  body.embed #intro p { font-size: 12px; }
+
+  /* Creature creator */
+  .creator-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px 20px;
+    margin-bottom: 6px;
+    max-width: 560px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .creator-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: center;
+    text-align: center;
+  }
+  .creator-label {
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--hud-dim);
+  }
+  .creator-sublabel {
+    font-size: 10px;
+    color: var(--hud-dim);
+    font-style: italic;
+    min-height: 14px;
+    letter-spacing: 0.04em;
+    text-align: center;
+  }
+  .creator-row { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+  .creator-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+    margin-top: 6px;
+  }
+  .creator-mini-btn {
+    padding: 5px 10px;
+    border: 1px solid var(--hud-line);
+    border-radius: 4px;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--hud-dim);
+    cursor: pointer;
+    background: rgba(12, 24, 38, 0.6);
+    font-family: var(--font-stack);
+  }
+  .creator-mini-btn:hover { color: var(--hud-fg); border-color: rgba(120,200,255,0.35); }
+  .pause-stack {
+    display: grid;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  #pause-settings-panel {
+    margin-top: 8px;
+    padding: 10px;
+    border: 1px solid var(--hud-line);
+    border-radius: 6px;
+    background: rgba(10, 20, 32, 0.5);
+    text-align: left;
+    display: none;
+  }
+  .pause-setting-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    color: var(--hud-dim);
+  }
+  @media (max-width: 720px) {
+    .creator-grid { grid-template-columns: 1fr; }
+  }
+
+  @media (max-width: 980px), (pointer: coarse) {
+    #hud-controls { display: none; }
+    #hud-goals {
+      right: 10px;
+      top: 10px;
+      max-width: 50vw;
+      min-width: 170px;
+      padding: 8px 10px;
+      font-size: 11px;
+    }
+    #hud-stats {
+      left: 10px;
+      top: 10px;
+      min-width: 156px;
+      padding: 8px 10px;
+    }
+    #hud-codex {
+      left: 10px;
+      bottom: 96px;
+      min-width: 170px;
+      max-width: 54vw;
+      padding: 7px 9px;
+    }
+    #hud-biome {
+      left: 10px;
+      top: 96px;
+      min-width: 132px;
+      padding: 7px 10px;
+    }
+    #mobile-controls { display: block; }
+    #intro .controls-hint { letter-spacing: 0.08em; font-size: 10px; }
+  }
+  .creator-chip {
+    padding: 4px 10px;
+    border: 1px solid var(--hud-line);
+    border-radius: 4px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    color: var(--hud-dim);
+    cursor: pointer;
+    background: rgba(10, 20, 32, 0.5);
+    transition: all 0.12s;
+  }
+  .creator-chip:hover { color: var(--hud-fg); border-color: rgba(120,200,255,0.35); }
+  .creator-chip.active {
+    color: var(--hud-fg);
+    border-color: rgba(120, 200, 255, 0.55);
+    background: rgba(30, 55, 80, 0.6);
+  }
+  .color-swatch {
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: border-color 0.12s, transform 0.12s;
+  }
+  .color-swatch:hover { transform: scale(1.15); }
+  .color-swatch.active { border-color: rgba(255,255,255,0.8); transform: scale(1.12); }
+</style>
+</head>
+<body>
+  <div id="game-root">
+    <canvas id="game-canvas"></canvas>
+
+    <div id="hud-stats" class="hud">
+      <div class="stat-row">
+        <div class="stat-label">Health</div>
+        <div class="bar-track bar-health"><div class="bar-fill" id="bar-health"></div></div>
+        <div class="stat-value" id="val-health">100</div>
+      </div>
+      <div class="stat-row">
+        <div class="stat-label">Energy</div>
+        <div class="bar-track bar-energy"><div class="bar-fill" id="bar-energy"></div></div>
+        <div class="stat-value" id="val-energy">100</div>
+      </div>
+      <div class="stat-row">
+        <div class="stat-label">Size</div>
+        <div class="bar-track bar-size"><div class="bar-fill" id="bar-size"></div></div>
+        <div class="stat-value" id="val-size">1.0</div>
+      </div>
+    </div>
+
+    <div id="hud-biome" class="hud">
+      <div id="biome-name">PRIMORDIAL BLOOM</div>
+      <div id="biome-tier">TIER I · SAFE</div>
+    </div>
+
+    <div id="hud-goals" class="hud">
+      <div class="goal-title">Adaptation Goals</div>
+      <div id="goal-list"></div>
+    </div>
+
+    <div id="hud-warn" class="hud">PREDATOR NEAR</div>
+
+    <div id="hud-event" class="hud">
+      <div id="event-title">PLANKTON BLOOM</div>
+      <div id="event-desc">Nutrient density rises across the zone.</div>
+    </div>
+
+    <div id="hud-controls" class="hud">
+      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or <kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd> move
+      &nbsp;·&nbsp; <kbd>Shift</kbd> dash
+      &nbsp;·&nbsp; <kbd>Space</kbd> pause
+    </div>
+
+    <div id="hud-meta" class="hud">
+      <div class="meta-row"><b id="meta-time">00:00</b> survived</div>
+      <div class="meta-row">seed <b id="meta-seed">—</b></div>
+    </div>
+
+    <div id="hud-codex" class="hud">
+      <div class="codex-header">
+        <div class="goal-title" style="margin-bottom:0;">Part Codex</div>
+        <button id="codex-toggle" type="button">Show</button>
+      </div>
+      <div class="codex-body" id="codex-body">
+        <div class="codex-count" id="codex-count">0 parts discovered</div>
+        <div class="codex-recent" id="codex-recent">No discoveries yet.</div>
+        <div class="codex-list" id="codex-list">No discoveries yet.</div>
+      </div>
+    </div>
+
+    <div id="mobile-controls" aria-hidden="true">
+      <div id="mob-stick-zone" class="stick-zone">
+        <div id="mob-stick-knob" class="stick-knob"></div>
+      </div>
+      <button id="mob-dash" class="mob-btn" type="button">Dash</button>
+      <button id="mob-pause" class="mob-btn" type="button">Pause</button>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <!-- Mutation choice overlay -->
+    <div id="mutation-overlay" class="overlay">
+      <div class="modal">
+        <div class="modal-title">Mutation Available</div>
+        <div class="modal-subtitle" id="mutation-prompt">A new adaptation strains for expression. Choose one.</div>
+        <div class="mutation-grid" id="mutation-grid"></div>
+      </div>
+    </div>
+
+    <!-- Pause overlay -->
+    <div id="pause-overlay" class="overlay">
+      <div class="modal" style="text-align:center; max-width: 360px;">
+        <div class="modal-title">Paused</div>
+        <div class="modal-subtitle" style="margin-bottom: 8px;">The current stills.</div>
+        <div class="pause-stack">
+          <button class="btn" id="resume-btn">Resume</button>
+          <button class="btn" id="pause-settings-btn">Settings</button>
+          <button class="btn" id="pause-quit-menu-btn">Quit To Menu</button>
+          <button class="btn" id="pause-quit-desktop-btn">Quit To Desktop</button>
+        </div>
+        <div id="pause-settings-panel">
+          <div class="pause-setting-row"><span>Audio</span><button class="creator-mini-btn" id="pause-audio-btn" type="button">Toggle Audio</button></div>
+          <div class="pause-setting-row"><span>Zoom</span><button class="creator-mini-btn" id="pause-reset-zoom-btn" type="button">Reset Zoom</button></div>
+          <button class="creator-mini-btn" id="pause-settings-close-btn" type="button">Close Settings</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Game over overlay -->
+    <div id="game-over" class="overlay">
+      <div class="modal">
+        <div class="modal-title" id="death-cause">Consumed</div>
+        <div class="modal-subtitle">The drift continues without you.</div>
+        <div class="summary-grid" id="summary-grid"></div>
+        <button class="btn" id="restart-btn">Begin Again</button>
+      </div>
+    </div>
+
+    <!-- Intro + Creature Creator overlay -->
+    <div id="intro" class="overlay show">
+      <div class="modal" style="max-width: 680px;">
+        <div class="modal-title">Drift</div>
+        <div class="modal-subtitle" style="margin-bottom: 14px;">A Micro-Ecosystem</div>
+
+        <div class="creator-grid">
+          <div class="creator-block">
+            <div class="creator-label">Body Shape</div>
+            <div class="creator-row" id="body-choices">
+              <div class="creator-chip active" data-body="round">Round</div>
+              <div class="creator-chip" data-body="oval">Oval</div>
+              <div class="creator-chip" data-body="long">Elongated</div>
+              <div class="creator-chip" data-body="soft">Soft</div>
+            </div>
+          </div>
+          <div class="creator-block">
+            <div class="creator-label">Coloration</div>
+            <div class="creator-row" id="color-choices">
+              <div class="color-swatch active" data-hue="195" style="background:hsl(195,70%,52%)"></div>
+              <div class="color-swatch" data-hue="280" style="background:hsl(280,65%,52%)"></div>
+              <div class="color-swatch" data-hue="50"  style="background:hsl(50,80%,52%)"></div>
+              <div class="color-swatch" data-hue="0"   style="background:hsl(0,70%,52%)"></div>
+              <div class="color-swatch" data-hue="110" style="background:hsl(110,55%,42%)"></div>
+              <div class="color-swatch" data-hue="30"  style="background:hsl(30,80%,52%)"></div>
+            </div>
+          </div>
+          <div class="creator-block">
+            <div class="creator-label">Diet</div>
+            <div class="creator-row" id="diet-choices">
+              <div class="creator-chip active" data-diet="herbivore">Herbivore</div>
+              <div class="creator-chip" data-diet="carnivore">Carnivore</div>
+            </div>
+            <div class="creator-sublabel" id="diet-desc">Efficient at plants. Omnivore unlocks later at a major milestone.</div>
+          </div>
+          <div class="creator-block">
+            <div class="creator-label">Starting Adaptation</div>
+            <div class="creator-row" id="trait-choices">
+              <div class="creator-chip active" data-trait="none">Balanced</div>
+              <div class="creator-chip" data-trait="fins">Fins</div>
+              <div class="creator-chip" data-trait="eyes">Eyes</div>
+              <div class="creator-chip" data-trait="armor">Carapace</div>
+              <div class="creator-chip" data-trait="metabolism">Slow Metab.</div>
+            </div>
+            <div class="creator-sublabel" id="trait-desc">No bonus, no cost. Pure adaptation.</div>
+          </div>
+
+          <div class="creator-block">
+            <div class="creator-label">Build Focus</div>
+            <div class="creator-row" id="build-choices">
+              <div class="creator-chip active" data-build="balanced">Balanced</div>
+              <div class="creator-chip" data-build="swift">Swift</div>
+              <div class="creator-chip" data-build="armored">Armored</div>
+              <div class="creator-chip" data-build="efficient">Efficient</div>
+            </div>
+            <div class="creator-sublabel" id="build-desc">No stat bias. Neutral opening.</div>
+          </div>
+
+          <div class="creator-block">
+            <div class="creator-label">Quick Presets</div>
+            <div class="creator-row" id="preset-choices">
+              <div class="creator-chip" data-preset="grazer">Grazer</div>
+              <div class="creator-chip" data-preset="hunter">Hunter</div>
+              <div class="creator-chip" data-preset="drifter">Drifter</div>
+              <div class="creator-chip" data-preset="tank">Tank</div>
+            </div>
+            <div class="creator-sublabel">One tap setup for a stronger starting identity.</div>
+          </div>
+        </div>
+
+        <div class="creator-actions">
+          <button class="creator-mini-btn" id="creator-randomize-btn" type="button">Randomize</button>
+        </div>
+
+        <div style="text-align:center; margin: 14px 0 6px;">
+          <canvas id="creator-preview" width="110" height="110" style="display:block; width:110px; height:110px; border-radius:50%; background:rgba(10,20,32,0.6); border:1px solid rgba(120,200,255,0.15);"></canvas>
+        </div>
+
+        <div class="controls-hint">
+          <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrow keys move &nbsp;·&nbsp; <kbd>Shift</kbd> dash &nbsp;·&nbsp; <kbd>Space</kbd> pause &nbsp;·&nbsp; mouse to aim<br>
+          Mobile: left stick to move, <kbd>Dash</kbd> to burst, <kbd>Pause</kbd> to pause
+        </div>
+        <div class="seed-row">
+          <label for="seed-input">SEED</label>
+          <input id="seed-input" type="text" placeholder="random" autocomplete="off">
+        </div>
+        <button class="btn" id="start-btn">Begin Drift</button>
+        <div style="margin-top:14px;">
+          <a href="home.html" style="font-size:11px; color:var(--hud-dim); text-decoration:none; letter-spacing:0.08em;">← scoreboard</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Pre-fill seed from URL param (replay links from scoreboard)
+    (function() {
+      const params = new URLSearchParams(window.location.search);
+      const urlSeed = params.get('seed');
+      if (urlSeed) {
+        window.GAME_CONFIG = window.GAME_CONFIG || {};
+        window.GAME_CONFIG.seed = urlSeed;
+      }
+    })();
+
+    window.GAME_CONFIG = window.GAME_CONFIG || {
+      seed: "random", width: null, height: null,
+      embedMode: false, audioEnabled: false, difficulty: "normal"
+    };
+
+    // Creator state
+    window.CREATOR = { body: 'round', hue: 195, diet: 'herbivore', trait: 'none', build: 'balanced' };
+
+    const DIET_DESC = {
+      herbivore: 'Plant clusters give 3× energy. Gains passive regen. Cannot eat meat.',
+      carnivore: 'Strong meat efficiency. Cannot digest plant clusters. Omnivore unlocks later.',
+    };
+    const TRAIT_DESC = {
+      none:        'No bonus, no cost. Pure adaptation.',
+      fins:        '+20% speed. −10% defense.',
+      eyes:        '+30% detection. +8% metabolism.',
+      armor:       '+20% defense. −10% speed.',
+      metabolism:  '−25% energy use. Heals 25% slower.',
+    };
+    const BUILD_DESC = {
+      balanced: 'No stat bias. Neutral opening.',
+      swift: 'Faster acceleration and top speed. Lower defense.',
+      armored: 'Higher defense and max HP. Lower speed.',
+      efficient: 'Lower metabolism and stronger regen. Lower bite pressure.'
+    };
+    const PRESETS = {
+      grazer: { body: 'soft', hue: 110, diet: 'herbivore', trait: 'metabolism', build: 'efficient' },
+      hunter: { body: 'long', hue: 0, diet: 'carnivore', trait: 'fins', build: 'swift' },
+      drifter: { body: 'oval', hue: 195, diet: 'herbivore', trait: 'eyes', build: 'balanced' },
+      tank: { body: 'round', hue: 30, diet: 'carnivore', trait: 'armor', build: 'armored' },
+    };
+
+    function syncCreatorUI() {
+      document.querySelectorAll('#body-choices .creator-chip').forEach(c => c.classList.toggle('active', c.dataset.body === window.CREATOR.body));
+      document.querySelectorAll('#color-choices .color-swatch').forEach(c => c.classList.toggle('active', parseInt(c.dataset.hue) === window.CREATOR.hue));
+      document.querySelectorAll('#diet-choices .creator-chip').forEach(c => c.classList.toggle('active', c.dataset.diet === window.CREATOR.diet));
+      document.querySelectorAll('#trait-choices .creator-chip').forEach(c => c.classList.toggle('active', c.dataset.trait === window.CREATOR.trait));
+      document.querySelectorAll('#build-choices .creator-chip').forEach(c => c.classList.toggle('active', c.dataset.build === window.CREATOR.build));
+      document.getElementById('diet-desc').textContent = DIET_DESC[window.CREATOR.diet] || '';
+      document.getElementById('trait-desc').textContent = TRAIT_DESC[window.CREATOR.trait] || '';
+      document.getElementById('build-desc').textContent = BUILD_DESC[window.CREATOR.build] || '';
+      drawCreatorPreview();
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      // Chip pickers
+      document.getElementById('body-choices').addEventListener('click', (e) => {
+        const chip = e.target.closest('[data-body]');
+        if (!chip) return;
+        document.querySelectorAll('#body-choices .creator-chip').forEach(c => c.classList.remove('active'));
+        chip.classList.add('active');
+        window.CREATOR.body = chip.dataset.body;
+        drawCreatorPreview();
+      });
+
+      document.getElementById('color-choices').addEventListener('click', (e) => {
+        const sw = e.target.closest('[data-hue]');
+        if (!sw) return;
+        document.querySelectorAll('#color-choices .color-swatch').forEach(c => c.classList.remove('active'));
+        sw.classList.add('active');
+        window.CREATOR.hue = parseInt(sw.dataset.hue);
+        drawCreatorPreview();
+      });
+
+      document.getElementById('diet-choices').addEventListener('click', (e) => {
+        const chip = e.target.closest('[data-diet]');
+        if (!chip) return;
+        document.querySelectorAll('#diet-choices .creator-chip').forEach(c => c.classList.remove('active'));
+        chip.classList.add('active');
+        window.CREATOR.diet = chip.dataset.diet;
+        document.getElementById('diet-desc').textContent = DIET_DESC[chip.dataset.diet] || '';
+        drawCreatorPreview();
+      });
+
+      document.getElementById('trait-choices').addEventListener('click', (e) => {
+        const chip = e.target.closest('[data-trait]');
+        if (!chip) return;
+        document.querySelectorAll('#trait-choices .creator-chip').forEach(c => c.classList.remove('active'));
+        chip.classList.add('active');
+        window.CREATOR.trait = chip.dataset.trait;
+        document.getElementById('trait-desc').textContent = TRAIT_DESC[chip.dataset.trait] || '';
+        drawCreatorPreview();
+      });
+
+      document.getElementById('build-choices').addEventListener('click', (e) => {
+        const chip = e.target.closest('[data-build]');
+        if (!chip) return;
+        window.CREATOR.build = chip.dataset.build;
+        syncCreatorUI();
+      });
+
+      document.getElementById('preset-choices').addEventListener('click', (e) => {
+        const chip = e.target.closest('[data-preset]');
+        if (!chip) return;
+        const preset = PRESETS[chip.dataset.preset];
+        if (!preset) return;
+        Object.assign(window.CREATOR, preset);
+        syncCreatorUI();
+      });
+
+      document.getElementById('creator-randomize-btn').addEventListener('click', () => {
+        const bodies = ['round', 'oval', 'long', 'soft'];
+        const colors = [195, 280, 50, 0, 110, 30];
+        const diets = ['herbivore', 'carnivore'];
+        const traits = ['none', 'fins', 'eyes', 'armor', 'metabolism'];
+        const builds = ['balanced', 'swift', 'armored', 'efficient'];
+        window.CREATOR.body = bodies[Math.floor(Math.random() * bodies.length)];
+        window.CREATOR.hue = colors[Math.floor(Math.random() * colors.length)];
+        window.CREATOR.diet = diets[Math.floor(Math.random() * diets.length)];
+        window.CREATOR.trait = traits[Math.floor(Math.random() * traits.length)];
+        window.CREATOR.build = builds[Math.floor(Math.random() * builds.length)];
+        syncCreatorUI();
+      });
+
+      syncCreatorUI();
+    });
+
+    function drawCreatorPreview() {
+      const canvas = document.getElementById('creator-preview');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width, H = canvas.height;
+      const cx = W / 2, cy = H / 2;
+      const { body, hue, diet } = window.CREATOR;
+      ctx.clearRect(0, 0, W, H);
+
+      // glow
+      const g = ctx.createRadialGradient(cx, cy, 8, cx, cy, 40);
+      g.addColorStop(0, `hsla(${hue},80%,70%,0.55)`);
+      g.addColorStop(1, `hsla(${hue},80%,55%,0)`);
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, 40, 0, Math.PI*2); ctx.fill();
+
+      // body
+      const r = 18;
+      ctx.fillStyle = `hsla(${hue},70%,68%,0.92)`;
+      ctx.strokeStyle = `hsla(${hue},75%,82%,0.65)`;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      if (body === 'oval')      ctx.ellipse(cx, cy, r*1.25, r*0.75, 0, 0, Math.PI*2);
+      else if (body === 'long') ctx.ellipse(cx, cy, r*1.5,  r*0.6,  0, 0, Math.PI*2);
+      else if (body === 'soft') {
+        for (let i = 0; i < 12; i++) {
+          const a = i/12 * Math.PI*2;
+          const rr = r * (0.9 + Math.sin(a*3) * 0.1);
+          const x = cx + Math.cos(a)*rr, y = cy + Math.sin(a)*rr;
+          if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+        }
+        ctx.closePath();
+      } else {
+        ctx.arc(cx, cy, r, 0, Math.PI*2);
+      }
+      ctx.fill(); ctx.stroke();
+
+      // nucleus
+      ctx.fillStyle = `hsla(${hue},65%,44%,0.5)`;
+      ctx.beginPath(); ctx.arc(cx, cy, r*0.32, 0, Math.PI*2); ctx.fill();
+
+      // eye
+      ctx.fillStyle = 'rgba(255,255,255,0.88)';
+      ctx.beginPath(); ctx.arc(cx + r*0.38, cy - r*0.18, r*0.12, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = 'rgba(0,0,0,0.9)';
+      ctx.beginPath(); ctx.arc(cx + r*0.41, cy - r*0.18, r*0.055, 0, Math.PI*2); ctx.fill();
+
+      // diet indicator
+      if (diet === 'herbivore') {
+        ctx.strokeStyle = `hsla(110,70%,55%,0.7)`; ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.arc(cx, cy, r*1.4, 0, Math.PI*2); ctx.stroke();
+      }
+    }
+  </script>
+  <script src="game.js"></script>
+</body>
+</html>
