@@ -1098,7 +1098,8 @@
       const ctx = canvas.getContext('2d');
       const W = canvas.width, H = canvas.height;
       const cx = W / 2, cy = H / 2;
-      const { body, hue, diet } = window.CREATOR;
+      const r = 18;
+      const { body, hue, diet, trait } = window.CREATOR;
       ctx.clearRect(0, 0, W, H);
 
       // glow
@@ -1107,8 +1108,22 @@
       g.addColorStop(1, `hsla(${hue},80%,55%,0)`);
       ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, 40, 0, Math.PI*2); ctx.fill();
 
+      // fins trait drawn behind body
+      if (trait === 'fins') {
+        ctx.fillStyle = `hsla(195,70%,70%,0.55)`;
+        ctx.beginPath();
+        ctx.moveTo(cx - r*0.1, cy - r*0.85);
+        ctx.quadraticCurveTo(cx - r*0.6, cy - r*1.4, cx - r*0.9, cy - r*0.6);
+        ctx.lineTo(cx - r*0.4, cy - r*0.7);
+        ctx.closePath(); ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(cx - r*0.1, cy + r*0.85);
+        ctx.quadraticCurveTo(cx - r*0.6, cy + r*1.4, cx - r*0.9, cy + r*0.6);
+        ctx.lineTo(cx - r*0.4, cy + r*0.7);
+        ctx.closePath(); ctx.fill();
+      }
+
       // body
-      const r = 18;
       ctx.fillStyle = `hsla(${hue},70%,68%,0.92)`;
       ctx.strokeStyle = `hsla(${hue},75%,82%,0.65)`;
       ctx.lineWidth = 1.2;
@@ -1128,15 +1143,46 @@
       }
       ctx.fill(); ctx.stroke();
 
+      // armor trait: carapace ring over body
+      if (trait === 'armor') {
+        ctx.strokeStyle = `hsla(200,30%,65%,0.65)`;
+        ctx.lineWidth = 1.4;
+        ctx.beginPath(); ctx.ellipse(cx, cy, r*1.18, r*1.0, 0, 0, Math.PI*2); ctx.stroke();
+        for (let i = 0; i < 4; i++) {
+          const a = -Math.PI/2 + (i-1.5)*0.4;
+          ctx.beginPath(); ctx.arc(cx, cy, r*1.1, a, a+0.25); ctx.stroke();
+        }
+      }
+
       // nucleus
       ctx.fillStyle = `hsla(${hue},65%,44%,0.5)`;
       ctx.beginPath(); ctx.arc(cx, cy, r*0.32, 0, Math.PI*2); ctx.fill();
 
-      // eye
-      ctx.fillStyle = 'rgba(255,255,255,0.88)';
-      ctx.beginPath(); ctx.arc(cx + r*0.38, cy - r*0.18, r*0.12, 0, Math.PI*2); ctx.fill();
-      ctx.fillStyle = 'rgba(0,0,0,0.9)';
-      ctx.beginPath(); ctx.arc(cx + r*0.41, cy - r*0.18, r*0.055, 0, Math.PI*2); ctx.fill();
+      // eyes trait: compound eyes
+      if (trait === 'eyes') {
+        const positions = [[-0.35, -0.45], [-0.6, -0.05], [-0.35, 0.45]];
+        for (const [px, py] of positions) {
+          ctx.fillStyle = 'rgba(255,255,255,0.88)';
+          ctx.beginPath(); ctx.arc(cx + px*r, cy + py*r, r*0.1, 0, Math.PI*2); ctx.fill();
+          ctx.fillStyle = 'rgba(0,0,0,0.9)';
+          ctx.beginPath(); ctx.arc(cx + px*r, cy + py*r, r*0.045, 0, Math.PI*2); ctx.fill();
+        }
+      } else {
+        // default eyespot
+        ctx.fillStyle = 'rgba(255,255,255,0.88)';
+        ctx.beginPath(); ctx.arc(cx + r*0.38, cy - r*0.18, r*0.12, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = 'rgba(0,0,0,0.9)';
+        ctx.beginPath(); ctx.arc(cx + r*0.41, cy - r*0.18, r*0.055, 0, Math.PI*2); ctx.fill();
+      }
+
+      // metabolism trait: pulsing internal ring
+      if (trait === 'metabolism') {
+        ctx.strokeStyle = `hsla(${hue},60%,75%,0.45)`;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 3]);
+        ctx.beginPath(); ctx.arc(cx, cy, r*0.72, 0, Math.PI*2); ctx.stroke();
+        ctx.setLineDash([]);
+      }
 
       // diet indicator
       if (diet === 'herbivore') {

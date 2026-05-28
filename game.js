@@ -1412,6 +1412,10 @@ class Creature extends Entity {
       else if (this.diet === 'herbivore') this.parts.push('filtermouth');
       else this.parts.push(rng() < 0.5 ? 'mandible' : 'filtermouth');
     }
+
+    if (!this._hasAnyPart(['eyespot'])) {
+      this.parts.push('eyespot');
+    }
   }
 
   _refreshGrowthLevel(rng, force = false) {
@@ -1878,14 +1882,23 @@ class Creature extends Entity {
       ctx.fill();
     }
 
-    // wobble: gentle breathing / idle oscillation
-    const wobble = 1 + 0.045 * Math.sin(performance.now() * 0.0018 + this.bornAt * 7.3);
+    // wobble: organic breathing / idle oscillation with secondary frequency
+    const tMs = performance.now();
+    const wobble = 1
+      + 0.088 * Math.sin(tMs * 0.003 + this.bornAt * 7.3)
+      + 0.028 * Math.sin(tMs * 0.0051 + this.bornAt * 3.7);
     const wr = r * wobble;
     const hitMorph = this.hitFlash * 0.12;
+    // velocity-based squish: stretch along movement axis, compress perpendicularly
+    const spd = Math.hypot(this.vx || 0, this.vy || 0);
+    const squishStretch = clamp(spd / 250, 0, 0.22);
 
     ctx.save();
     ctx.translate(sx, sy);
     ctx.rotate(this.angle);
+    if (squishStretch > 0.005) {
+      ctx.scale(1 + squishStretch * 0.55, 1 - squishStretch * 0.35);
+    }
     if (this.hitFlash > 0) {
       ctx.translate(-r * 0.14 * this.hitFlash, 0);
       ctx.scale(1 + hitMorph, 1 - hitMorph * 0.6);
@@ -1904,10 +1917,10 @@ class Creature extends Entity {
       ctx.beginPath(); ctx.ellipse(0, 0, wr * 1.45, wr * 0.62, 0, 0, TAU); ctx.fill(); ctx.stroke();
     } else if (this.body === 'soft') {
       ctx.beginPath();
-      const t = (performance.now() * 0.002 + this.bornAt) % 1;
-      for (let i = 0; i < 12; i++) {
-        const a = i / 12 * TAU;
-        const rr = wr * (0.92 + Math.sin(a * 3 + t * 6) * 0.08);
+      const t = (tMs * 0.002 + this.bornAt) % 1;
+      for (let i = 0; i < 16; i++) {
+        const a = i / 16 * TAU;
+        const rr = wr * (0.88 + Math.sin(a * 3 + t * 6) * 0.14 + Math.sin(a * 5 + t * 4.5) * 0.05);
         const x = Math.cos(a) * rr, y = Math.sin(a) * rr;
         if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
@@ -2761,10 +2774,11 @@ class Hazard extends Entity {
           base: (i / count) * TAU + (Math.random() - 0.5) * 0.24,
           len: this.r * (0.45 + Math.random() * 0.45),
           bend: 0,
+          angVel: 0,
           twigCount: 1 + ((Math.random() * 3) | 0),
           twigBias: (Math.random() - 0.5) * 0.5,
           droop: (Math.random() - 0.5) * 0.28,
-          curlJitter: 0.05 + Math.random() * 0.18,
+          curlJitter: 0.015 + Math.random() * 0.05,
           leafLobe: 0.75 + Math.random() * 0.6,
           twigSpread: 0.58 + Math.random() * 0.14,
         });
@@ -2778,11 +2792,15 @@ class Hazard extends Entity {
           curl: 0.7 + Math.random() * 0.85,
           twigCount: 2 + ((Math.random() * 2) | 0),
           droop: (Math.random() - 0.5) * 0.36,
-          curlJitter: 0.08 + Math.random() * 0.24,
+          curlJitter: 0.015 + Math.random() * 0.05,
           leafLobe: 0.85 + Math.random() * 0.8,
           twigSpread: 0.58 + Math.random() * 0.14,
         });
       }
+    }
+    if (type === 'spine_weed' || type === 'curl_weed') {
+      this.plantBuds = [];
+      this.budSpawnT = 0.8 + Math.random() * 1.5;
     }
   }
   update(dt) {
@@ -2790,7 +2808,11 @@ class Hazard extends Entity {
     if (this.life > this.maxLife) this.dead = true;
     this.t += dt;
     if (this.type === 'spine_weed') {
-      for (const lf of this.leaves) lf.bend *= Math.max(0, 1 - dt * 2.8);
+      for (const lf of this.leaves) {
+        lf.bend += lf.angVel * dt;
+        lf.angVel *= Math.max(0, 1 - dt * 4.5);
+        lf.bend *= Math.max(0, 1 - dt * 1.8);
+      }
     }
   }
   affect(target, dt, game) {
@@ -2816,7 +2838,7 @@ class Hazard extends Entity {
         if (ad < spread) {
           touched++;
           const side = angDelta(relA, la) >= 0 ? 1 : -1;
-          lf.bend += side * 0.11 * k;
+          lf.angVel += side * 1.4 * k;
         }
       }
       const stackSlow = clamp(0.2 + touched * 0.16 * k, 0.2, 0.94);
@@ -2876,7 +2898,7 @@ class Hazard extends Entity {
       ctx.lineWidth = 1.6;
       for (const lf of this.leaves) {
         const a = lf.base + lf.bend + lf.droop * 0.35;
-        const cA = a + Math.sin(this.t * 0.9 + lf.base * 4.4) * lf.curlJitter;
+        const cA = a + Math.sin(this.t * 0.4 + lf.base * 2.2) * lf.curlJitter;
         const xm = sx + Math.cos(cA) * lf.len * 0.52;
         const ym = sy + Math.sin(cA) * lf.len * 0.52;
         const x2 = sx + Math.cos(a) * lf.len;
@@ -2916,7 +2938,7 @@ class Hazard extends Entity {
       ctx.strokeStyle = hslaCSS(148, 52, 62, 0.78);
       ctx.lineWidth = 1.7;
       for (const lf of this.leaves) {
-        const a = lf.base + lf.droop * 0.4 + Math.sin(this.t * 0.8 + lf.base * 3) * lf.curlJitter;
+        const a = lf.base + lf.droop * 0.4 + Math.sin(this.t * 0.4 + lf.base * 2.2) * lf.curlJitter;
         const len = lf.len;
         const x1 = sx + Math.cos(a) * len * 0.35;
         const y1 = sy + Math.sin(a) * len * 0.35;
@@ -2948,6 +2970,23 @@ class Hazard extends Entity {
             ctx.fill();
           }
         }
+      }
+    }
+
+    // Draw growing food buds at center
+    if (this.plantBuds && this.plantBuds.length > 0) {
+      for (const bud of this.plantBuds) {
+        const fraction = Math.min(1, bud.growT / bud.growDur);
+        const budR = bud.maxR * fraction;
+        if (budR < 0.3) continue;
+        const pulse = 0.85 + 0.15 * Math.sin(this.t * 5 + bud.growT * 4);
+        const gBud = ctx.createRadialGradient(sx, sy, 0, sx, sy, budR * 3.5);
+        gBud.addColorStop(0, hslaCSS(116, 72, 66, 0.7 * fraction));
+        gBud.addColorStop(1, hslaCSS(116, 72, 66, 0));
+        ctx.fillStyle = gBud;
+        ctx.beginPath(); ctx.arc(sx, sy, budR * 3.5, 0, TAU); ctx.fill();
+        ctx.fillStyle = hslaCSS(128, 68, 74, fraction);
+        ctx.beginPath(); ctx.arc(sx, sy, budR * pulse, 0, TAU); ctx.fill();
       }
     }
   }
@@ -3221,7 +3260,8 @@ class Director {
     else if (biome.id === 'bloom') type = this.rng() < 0.62 ? 'spine_weed' : 'curl_weed';
     else return;
     const a = this.rng() * TAU;
-    const d = 500 + this.rng() * 700;
+    const minD = this.game.getSpawnExclusionRadius();
+    const d = minD + this.rng() * 700;
     const x = player.x + Math.cos(a) * d;
     const y = player.y + Math.sin(a) * d;
     const safe = this.game.findSafeSpawnPoint(x, y, 120, 10, 20);
@@ -4191,6 +4231,8 @@ class Game {
       for (let j = 0; j < nearby.length; j++) {
         const e = nearby[j];
         if (e.kind === 'creature' && !e.dead) hz.affect(e, dt, this);
+        // plant food is knocked around by plant hazard leaves
+        if ((hz.type === 'spine_weed' || hz.type === 'curl_weed') && e.kind === 'food' && e.type === 'plant' && !e.dead) hz.affect(e, dt, this);
       }
     }
 
@@ -4616,7 +4658,6 @@ class Game {
   emitHazardPlantFood(hz, dt) {
     if (!hz || hz.dead) return;
     if (hz.type !== 'spine_weed' && hz.type !== 'curl_weed') return;
-    if (!hz.leaves || hz.leaves.length === 0) return;
 
     let plantCount = 0;
     for (let i = 0; i < this.foods.length; i++) {
@@ -4624,33 +4665,39 @@ class Game {
     }
     if (plantCount >= Math.floor(T.FOOD_CAP * 0.7)) return;
 
-    hz.emitPlantT = (hz.emitPlantT || (0.45 + Math.random() * 1.4)) - dt;
-    if (hz.emitPlantT > 0) return;
-    hz.emitPlantT = 0.35 + Math.random() * 1.55;
-
-    const lf = hz.leaves[(Math.random() * hz.leaves.length) | 0];
-    if (!lf) return;
-    let a;
-    let tipX;
-    let tipY;
-    if (hz.type === 'curl_weed') {
-      a = lf.base + (lf.droop || 0) * 0.4 + Math.sin(hz.t * 0.8 + lf.base * 3) * (lf.curlJitter || 0.1) + (lf.curl || 0.8) * 0.25;
-      tipX = hz.x + Math.cos(a + (lf.curl || 0.8) * 0.35) * lf.len;
-      tipY = hz.y + Math.sin(a + (lf.curl || 0.8) * 0.35) * lf.len;
-    } else {
-      a = lf.base + (lf.bend || 0) + (lf.droop || 0) * 0.3;
-      tipX = hz.x + Math.cos(a) * lf.len;
-      tipY = hz.y + Math.sin(a) * lf.len;
+    // Grow buds at center; launch when fully grown
+    if (!hz.plantBuds) hz.plantBuds = [];
+    if (hz.budSpawnT === undefined) hz.budSpawnT = 0.8 + Math.random() * 1.5;
+    hz.budSpawnT -= dt;
+    if (hz.budSpawnT <= 0 && hz.plantBuds.length < 4) {
+      hz.plantBuds.push({
+        growT: 0,
+        growDur: 1.5 + Math.random() * 2.0,
+        maxR: 1.8 + Math.random() * 1.4,
+      });
+      hz.budSpawnT = 1.2 + Math.random() * 2.2;
     }
 
-    const f = this.spawnFood(tipX, tipY, 'plant', biomeAt(Math.hypot(tipX, tipY)), 1.2 + Math.random() * 1.2);
-    if (!f) return;
-    const current = this.getCurrentVectorAt(tipX, tipY);
-    const spd = 10 + Math.random() * 16;
-    f.vx = Math.cos(a) * spd + current.x * 0.85;
-    f.vy = Math.sin(a) * spd + current.y * 0.85;
-    f.linkOrigin = 'hazard';
-    f.relinkIntent = 0;
+    for (let i = hz.plantBuds.length - 1; i >= 0; i--) {
+      const bud = hz.plantBuds[i];
+      bud.growT += dt;
+      if (bud.growT >= bud.growDur) {
+        // Launch in a random direction
+        const launchA = Math.random() * TAU;
+        if (this.foods.length < T.FOOD_CAP) {
+          const biome = biomeAt(Math.hypot(hz.x, hz.y));
+          const f = new Food(hz.x, hz.y, 'plant', biome, bud.maxR);
+          this.foods.push(f);
+          const spd = 60 + Math.random() * 65;
+          f.vx = Math.cos(launchA) * spd;
+          f.vy = Math.sin(launchA) * spd;
+          f.linkOrigin = 'hazard';
+          f.relinkIntent = 0;
+          f.snapT = 0.35;
+        }
+        hz.plantBuds.splice(i, 1);
+      }
+    }
   }
 
   tryLinkPlantFoods(a, b, force = false) {
