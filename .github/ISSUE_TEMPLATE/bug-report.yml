@@ -1,0 +1,124 @@
+name: Bug Report
+description: Report a defect or unexpected behaviour for triage and resolution.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to report a reproducible bug. Fill in every section so agents can triage and fix it autonomously.
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What were you trying to achieve when the bug occurred?
+      placeholder: "e.g. Authenticate a user via the /auth/login endpoint."
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Project Context
+      description: |
+        Relevant background about the environment, version, or configuration where the bug occurs.
+      placeholder: |
+        - Version / commit: v1.2.3 or SHA abc1234
+        - Environment: production / staging / local
+        - OS / runtime: Ubuntu 22.04, Node 20
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: |
+        What IS affected (files, endpoints, features) and what is NOT affected.
+      placeholder: |
+        **Affected:**
+        - POST /auth/login endpoint
+        - JWT validation middleware
+
+        **Not affected:**
+        - Registration flow
+        - Password reset
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: |
+        Clear, testable conditions that must be met for this bug to be considered fixed.
+      placeholder: |
+        - [ ] POST /auth/login returns 200 with a valid JWT for correct credentials
+        - [ ] No 500 errors appear in logs during normal login
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal steps to consistently reproduce the bug.
+      placeholder: |
+        1. Send POST /auth/login with `{"email":"user@example.com","password":"correct"}`
+        2. Observe 500 Internal Server Error
+        3. Check logs for `TypeError: Cannot read properties of undefined`
+    validations:
+      required: true
+
+  - type: textarea
+    id: test_plan
+    attributes:
+      label: Test Plan
+      description: |
+        How should the fix be tested? The QA Agent will expand on this.
+      placeholder: |
+        - Unit: mock DB, verify token is returned on valid credentials
+        - Integration: real DB, full login request
+        - Regression: ensure existing auth tests still pass
+    validations:
+      required: false
+
+  - type: textarea
+    id: rollback
+    attributes:
+      label: Rollback Plan
+      description: |
+        How can a failed fix be safely reverted?
+      placeholder: |
+        - Feature flag: AUTH_ENABLED=false bypasses the affected middleware
+        - Revert PR #XX to restore previous behaviour
+    validations:
+      required: false
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - "🔴 Critical"
+        - "🟠 High"
+        - "🟡 Medium"
+        - "🟢 Low"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: agents
+    attributes:
+      label: Agents Required
+      description: Which agents need to act on this bug report?
+      options:
+        - label: Research Agent
+        - label: Tech Lead Agent
+        - label: Backend Agent
+        - label: Frontend Agent
+        - label: Security Agent
+        - label: DevOps Agent
+        - label: QA Agent
+        - label: Documentation Agent

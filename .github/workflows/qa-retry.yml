@@ -1,0 +1,65 @@
+name: QA Retry — Restart Agent Workflow
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  post-qa-retry:
+    if: github.event.label.name == 'qa-failed'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Post QA retry instructions
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const number = context.payload.issue.number;
+
+            const body = [
+              '## 🔄 QA Failed — Restarting Agent Workflow',
+              '',
+              'The QA Agent has identified blocking defects. The agent workflow is restarting from Step 1.',
+              '**Include the QA findings documented above as additional context for every agent in this new pass.**',
+              '',
+              '---',
+              '',
+              '### Agent Chain (Remediation Pass — with QA context)',
+              '',
+              '- [ ] **Step 1 — 🔬 Research Agent** [`docs/dev-agents/RESEARCH.md`](../blob/main/docs/dev-agents/RESEARCH.md)',
+              '  Re-investigate with QA findings as additional context. Focus on defect root causes.',
+              '',
+              '- [ ] **Step 2 — 🗺️ Tech Lead Agent** [`docs/dev-agents/TECH_LEAD.md`](../blob/main/docs/dev-agents/TECH_LEAD.md)',
+              '  Update the implementation plan to address all defects reported by QA.',
+              '',
+              '- [ ] **Step 3 — ⚙️ Backend Agent** [`docs/dev-agents/BACKEND.md`](../blob/main/docs/dev-agents/BACKEND.md)',
+              '  Apply the Tech Lead\'s updated plan to fix backend defects.',
+              '',
+              '- [ ] **Step 4 — 🖥️ Frontend Agent** [`docs/dev-agents/FRONTEND.md`](../blob/main/docs/dev-agents/FRONTEND.md)',
+              '  Apply the Tech Lead\'s updated plan to fix frontend defects.',
+              '',
+              '- [ ] **Step 5 — 🚀 DevOps Agent** [`docs/dev-agents/DEVOPS.md`](../blob/main/docs/dev-agents/DEVOPS.md)',
+              '  Verify infrastructure and CI/CD changes are still valid after the fix.',
+              '',
+              '- [ ] **Step 6 — 🔒 Security Agent** [`docs/dev-agents/SECURITY.md`](../blob/main/docs/dev-agents/SECURITY.md)',
+              '  Re-review the updated implementation for any new or unresolved security issues.',
+              '',
+              '- [ ] **Step 7 — 🧪 QA Agent** [`docs/dev-agents/QA.md`](../blob/main/docs/dev-agents/QA.md)',
+              '  Re-execute the full test plan. Confirm all previously reported defects are resolved.',
+              '  > ⚠️ **If blocking defects remain:** document findings and re-apply the `qa-failed` label.',
+              '',
+              '- [ ] **Step 8 — 📚 Documentation Agent** [`docs/dev-agents/DOCUMENTATION.md`](../blob/main/docs/dev-agents/DOCUMENTATION.md)',
+              '  Update documentation to reflect any changes made during this remediation pass.',
+              '',
+              '---',
+              '',
+              '> Once QA passes, remove the `qa-failed` label and proceed to merge.',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+              body,
+            });

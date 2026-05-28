@@ -1,0 +1,137 @@
+name: Work Order
+description: Submit a scoped task or feature request for AI-agent-driven development.
+title: "[Work Order] "
+labels: ["work-order"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to create a structured work order for the multi-agent development workflow.
+        Fill in each section as completely as possible so agents can act autonomously.
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What is the high-level objective of this work order? What problem does it solve?
+      placeholder: "e.g. Add user authentication with JWT tokens to the API."
+    validations:
+      required: true
+
+  - type: textarea
+    id: research
+    attributes:
+      label: Research & Context
+      description: |
+        Relevant prior art, best practices, external standards, or findings from the Research Agent.
+        Link to any research issues, ADRs, or external resources.
+      placeholder: |
+        - Research issue: #XX
+        - Relevant RFC / spec: https://...
+        - Prior art / competitive solutions: ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Project Context
+      description: |
+        Relevant background about the current project state, architecture decisions, or constraints
+        that agents need to be aware of to execute this work order correctly.
+      placeholder: |
+        - Current auth approach: none
+        - Tech stack: FastAPI + PostgreSQL + React
+        - Constraint: Must remain stateless (no sessions)
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: |
+        Explicit list of what IS and IS NOT in scope for this work order.
+        Break down by area if applicable (backend, frontend, infra, docs, etc.).
+      placeholder: |
+        **In scope:**
+        - [ ] POST /auth/login endpoint
+        - [ ] JWT issuance and validation middleware
+        - [ ] Frontend login form + token storage
+
+        **Out of scope:**
+        - OAuth / social login
+        - Password reset flow
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: |
+        Clear, testable criteria that must be met for this work order to be considered complete.
+        Written as "Given / When / Then" or as a checklist.
+      placeholder: |
+        - [ ] Users can obtain a JWT by providing valid credentials
+        - [ ] Protected routes return 401 for missing/invalid tokens
+        - [ ] Token expiry is configurable via environment variable
+        - [ ] Frontend stores token in httpOnly cookie (not localStorage)
+    validations:
+      required: true
+
+  - type: textarea
+    id: test_plan
+    attributes:
+      label: Test Plan
+      description: |
+        High-level testing strategy for this work order. The QA Agent will expand on this.
+        Include unit, integration, and end-to-end test expectations.
+      placeholder: |
+        - Unit: token generation and validation logic
+        - Integration: login endpoint with real DB
+        - E2E: full login flow in the browser
+        - Security: brute-force, token replay, expiry edge cases
+    validations:
+      required: false
+
+  - type: textarea
+    id: rollback
+    attributes:
+      label: Rollback Plan
+      description: |
+        How can this change be safely reverted if issues are found in production?
+        Note any migration steps, feature flags, or data concerns.
+      placeholder: |
+        - Feature flag: AUTH_ENABLED=false disables all auth middleware
+        - No DB migrations required for rollback
+        - Revert PR #XX to restore previous behaviour
+    validations:
+      required: false
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - "🔴 Critical"
+        - "🟠 High"
+        - "🟡 Medium"
+        - "🟢 Low"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: agents
+    attributes:
+      label: Agents Required
+      description: Which agents need to act on this work order?
+      options:
+        - label: Research Agent
+        - label: Tech Lead Agent
+        - label: Backend Agent
+        - label: Frontend Agent
+        - label: Security Agent
+        - label: DevOps Agent
+        - label: QA Agent
+        - label: Documentation Agent

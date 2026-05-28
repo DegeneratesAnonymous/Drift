@@ -1,0 +1,97 @@
+name: Agent Workflow Orchestration
+
+on:
+  issues:
+    types: [opened]
+  pull_request:
+    types: [opened]
+
+jobs:
+  post-workflow-checklist:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Ensure qa-failed label exists
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.issues.getLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'qa-failed',
+              });
+            } catch (e) {
+              if (e.status === 404) {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: 'qa-failed',
+                  color: 'd93f0b',
+                  description: 'QA found blocking defects; agent workflow requires restart with QA context.',
+                });
+              }
+            }
+
+      - name: Post agent workflow checklist
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const isPR = context.eventName === 'pull_request';
+            const number = isPR
+              ? context.payload.pull_request.number
+              : context.payload.issue.number;
+            const type = isPR ? 'pull request' : 'issue';
+
+            const body = [
+              '## 🤖 Agent Workflow Initiated',
+              '',
+              `This ${type} has been picked up by the automated agent workflow.`,
+              'Work through each step in order, using the linked prompt file to invoke each agent.',
+              'Paste each agent\'s output as context for the next step in the chain.',
+              '',
+              '---',
+              '',
+              '### Agent Chain',
+              '',
+              '- [ ] **Step 1 — 🔬 Research Agent** [`docs/dev-agents/RESEARCH.md`](../blob/main/docs/dev-agents/RESEARCH.md)',
+              '  Investigate the issue, gather best practices, and produce a structured research summary.',
+              '  _Output → feed into Tech Lead as context._',
+              '',
+              '- [ ] **Step 2 — 🗺️ Tech Lead Agent** [`docs/dev-agents/TECH_LEAD.md`](../blob/main/docs/dev-agents/TECH_LEAD.md)',
+              '  Review research output, define interface contracts, and assign sub-tasks to each agent.',
+              '  _Output → sub-task lists used by all subsequent agents._',
+              '',
+              '- [ ] **Step 3 — ⚙️ Backend Agent** [`docs/dev-agents/BACKEND.md`](../blob/main/docs/dev-agents/BACKEND.md)',
+              '  Implement backend sub-tasks as defined by the Tech Lead.',
+              '',
+              '- [ ] **Step 4 — 🖥️ Frontend Agent** [`docs/dev-agents/FRONTEND.md`](../blob/main/docs/dev-agents/FRONTEND.md)',
+              '  Implement frontend sub-tasks as defined by the Tech Lead.',
+              '',
+              '- [ ] **Step 5 — 🚀 DevOps Agent** [`docs/dev-agents/DEVOPS.md`](../blob/main/docs/dev-agents/DEVOPS.md)',
+              '  Handle CI/CD, environment, infrastructure, and dependency tasks.',
+              '',
+              '- [ ] **Step 6 — 🔒 Security Agent** [`docs/dev-agents/SECURITY.md`](../blob/main/docs/dev-agents/SECURITY.md)',
+              '  Review all implementation for security issues. All findings must be resolved before QA.',
+              '',
+              '- [ ] **Step 7 — 🧪 QA Agent** [`docs/dev-agents/QA.md`](../blob/main/docs/dev-agents/QA.md)',
+              '  Execute the test plan against all acceptance criteria.',
+              '  > ⚠️ **If blocking defects are found:** document findings in a comment and apply the `qa-failed` label.',
+              '  > The workflow will restart from Step 1 with QA findings included as additional context.',
+              '',
+              '- [ ] **Step 8 — 📚 Documentation Agent** [`docs/dev-agents/DOCUMENTATION.md`](../blob/main/docs/dev-agents/DOCUMENTATION.md)',
+              '  Update README, `docs/`, and any other affected documentation to reflect all completed changes.',
+              '',
+              '---',
+              '',
+              '> 📖 Full workflow guide: [`docs/DEV_WORKFLOW.md`](../blob/main/docs/DEV_WORKFLOW.md)',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+              body,
+            });
