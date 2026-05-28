@@ -19,15 +19,15 @@ This repository is **Drift**, a static HTML/JavaScript procedural micro-ecosyste
 
 ## Files to inspect before editing
 
-- `/tmp/workspace/DegeneratesAnonymous/Drift/home.html`
-- `/tmp/workspace/DegeneratesAnonymous/Drift/index.html`
-- `/tmp/workspace/DegeneratesAnonymous/Drift/game.js`
-- `/tmp/workspace/DegeneratesAnonymous/Drift/README.md`
-- `/tmp/workspace/DegeneratesAnonymous/Drift/docs/VERIFYING.md`
-- `/tmp/workspace/DegeneratesAnonymous/Drift/docs/DEV_WORKFLOW.md`
-- `/tmp/workspace/DegeneratesAnonymous/Drift/.github/workflows/agent-workflow.yml`
-- `/tmp/workspace/DegeneratesAnonymous/Drift/.github/workflows/qa-retry.yml`
-- `/tmp/workspace/DegeneratesAnonymous/Drift/.github/ISSUE_TEMPLATE/`
+- `home.html`
+- `index.html`
+- `game.js`
+- `README.md`
+- `docs/VERIFYING.md`
+- `docs/DEV_WORKFLOW.md`
+- `.github/workflows/agent-workflow.yml`
+- `.github/workflows/qa-retry.yml`
+- `.github/ISSUE_TEMPLATE/`
 
 ## Required change workflow
 
