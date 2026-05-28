@@ -19,6 +19,8 @@ This repository is **Drift**, a static HTML/JavaScript procedural micro-ecosyste
 
 ## Files to inspect before editing
 
+Paths below are relative to the repository root.
+
 - `home.html`
 - `index.html`
 - `game.js`
