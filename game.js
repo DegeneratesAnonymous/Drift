@@ -1136,14 +1136,15 @@ class Player extends Entity {
     ctx.translate(sx, sy);
     ctx.rotate(this.angle);
 
-    const gs = 1 + (this.r - T.PLAYER_START_SIZE) * 0.018;
-    const gLevel = this.growthLevel || 0;
+    const gLevel = Math.round(
+      clamp((this.r - T.PLAYER_START_SIZE) / Math.max(1, T.PLAYER_MAX_SIZE - T.PLAYER_START_SIZE), 0, 1) * 9
+    );
     const spineExt = 1 + Math.min(gLevel, 9) * 0.022;   // spine visibly extends with growth level
     const bodyShape = this.creatorBody || 'round';
     const bHue = this.creatorHue !== undefined ? this.creatorHue : 195;
     const motion = clamp(Math.hypot(this.vx || 0, this.vy || 0) / Math.max(1, this.speed), 0, 1);
-    const prx = r * (bodyShape==='long'?1.38:bodyShape==='oval'?1.14:bodyShape==='soft'?0.96:1.04) * gs * spineExt * (1 + motion * 0.07);
-    const pry = r * (bodyShape==='long'?0.60:bodyShape==='oval'?0.80:bodyShape==='soft'?0.94:0.80) * gs * (1 + Math.min(gLevel, 9) * 0.006) * (1 - motion * 0.04);
+    const prx = r * (bodyShape==='long'?1.38:bodyShape==='oval'?1.14:bodyShape==='soft'?0.96:1.04) * spineExt * (1 + motion * 0.07);
+    const pry = r * (bodyShape==='long'?0.60:bodyShape==='oval'?0.80:bodyShape==='soft'?0.94:0.80) * (1 + Math.min(gLevel, 9) * 0.006) * (1 - motion * 0.04);
     const ptailX  = -(prx + r * 0.16);
     const pheadX  =  prx * 0.80;
     const pheadTip = prx + r * 0.40;
@@ -1153,7 +1154,7 @@ class Player extends Entity {
 
     ctx.fillStyle   = hslaCSS(bHue, 75, 75, 0.95);
     ctx.strokeStyle = hslaCSS(bHue, 80, 85, 0.6);
-    ctx.lineWidth = Math.max(0.8, r * 0.038) * gs;
+    ctx.lineWidth = Math.max(0.8, r * 0.038);
     ctx.beginPath();
     ctx.moveTo(ptailX, ptailW + tailShiftP);
     ctx.bezierCurveTo(ptailX * 0.62 + midShiftP * 0.5, pry * 0.72 + tailShiftP * 0.5,
@@ -1169,24 +1170,24 @@ class Player extends Entity {
     ctx.fill(); ctx.stroke();
 
     ctx.fillStyle = hslaCSS(bHue, 70, 50, 0.55);
-    ctx.beginPath(); ctx.arc(prx * 0.05, 0, r * 0.32 * gs, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(prx * 0.05, 0, r * 0.32, 0, TAU); ctx.fill();
 
     const eyeX = pheadX * 0.72, eyeY = -pry * 0.38;
     ctx.fillStyle = hslaCSS(0, 0, 96, 0.92);
-    ctx.beginPath(); ctx.arc(eyeX, eyeY, r * 0.155 * gs, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(eyeX, eyeY, r * 0.155, 0, TAU); ctx.fill();
     ctx.fillStyle = hslaCSS(bHue + 20, 65, 45, 0.90);
-    ctx.beginPath(); ctx.arc(eyeX + r*0.025*gs, eyeY, r * 0.10 * gs, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(eyeX + r*0.025, eyeY, r * 0.10, 0, TAU); ctx.fill();
     ctx.fillStyle = hslaCSS(0, 0, 8, 1);
-    ctx.beginPath(); ctx.arc(eyeX + r*0.035*gs, eyeY, r * 0.058 * gs, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(eyeX + r*0.035, eyeY, r * 0.058, 0, TAU); ctx.fill();
     ctx.fillStyle = hslaCSS(0, 0, 100, 0.85);
-    ctx.beginPath(); ctx.arc(eyeX + r*0.055*gs, eyeY - r*0.038*gs, r * 0.028 * gs, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(eyeX + r*0.055, eyeY - r*0.038, r * 0.028, 0, TAU); ctx.fill();
 
     ctx.strokeStyle = hslaCSS(bHue + 10, 50, 35, 0.55);
-    ctx.lineWidth = Math.max(0.6, r * 0.028) * gs;
+    ctx.lineWidth = Math.max(0.6, r * 0.028);
     ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.moveTo(pheadTip - r*0.04*gs, -r*0.055*gs);
-    ctx.lineTo(pheadTip + r*0.02*gs,  r*0.055*gs);
+    ctx.moveTo(pheadTip - r*0.04, -r*0.055);
+    ctx.lineTo(pheadTip + r*0.02,  r*0.055);
     ctx.stroke();
     ctx.lineCap = 'butt';
 
