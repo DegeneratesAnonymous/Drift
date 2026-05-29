@@ -1009,6 +1009,16 @@ class Player extends Entity {
       this.angle += clamp(d, -tr * dt, tr * dt);
     }
 
+    // spine-bend physics
+    if (this._spinePrevAngle === undefined) this._spinePrevAngle = this.angle;
+    let _spDelta = this.angle - this._spinePrevAngle;
+    if (_spDelta > Math.PI) _spDelta -= TAU;
+    if (_spDelta < -Math.PI) _spDelta += TAU;
+    this._spinePrevAngle = this.angle;
+    const _pBendTarget = clamp(_spDelta / Math.max(0.008, dt) * 0.055, -0.85, 0.85);
+    this._bendMid  = lerp(this._bendMid  || 0, _pBendTarget, Math.min(1, dt * 5.5));
+    this._bendTail = lerp(this._bendTail || 0, this._bendMid, Math.min(1, dt * 3.2));
+
     this.x += this.vx * dt;
     this.y += this.vy * dt;
 
@@ -1121,44 +1131,66 @@ class Player extends Entity {
     ctx.fillStyle = grad;
     ctx.beginPath(); ctx.arc(sx, sy, glowR, 0, TAU); ctx.fill();
 
-    // body
+    // body — fish-body bezier silhouette with spine-bend
     ctx.save();
     ctx.translate(sx, sy);
     ctx.rotate(this.angle);
 
-    // body — shape/color from creator or defaults
+    const gLevel = Math.round(
+      clamp((this.r - T.PLAYER_START_SIZE) / Math.max(1, T.PLAYER_MAX_SIZE - T.PLAYER_START_SIZE), 0, 1) * 9
+    );
+    const spineExt = 1 + Math.min(gLevel, 9) * 0.022;   // spine visibly extends with growth level
     const bodyShape = this.creatorBody || 'round';
-    const bodyHue = this.creatorHue !== undefined ? this.creatorHue : 195;
-    ctx.fillStyle = hslaCSS(bodyHue, 75, 75, 0.95);
-    ctx.strokeStyle = hslaCSS(bodyHue, 80, 85, 0.6);
-    ctx.lineWidth = 1.2;
+    const bHue = this.creatorHue !== undefined ? this.creatorHue : 195;
+    const motion = clamp(Math.hypot(this.vx || 0, this.vy || 0) / Math.max(1, this.speed), 0, 1);
+    const prx = r * (bodyShape==='long'?1.38:bodyShape==='oval'?1.14:bodyShape==='soft'?0.96:1.04) * spineExt * (1 + motion * 0.07);
+    const pry = r * (bodyShape==='long'?0.60:bodyShape==='oval'?0.80:bodyShape==='soft'?0.94:0.80) * (1 + Math.min(gLevel, 9) * 0.006) * (1 - motion * 0.04);
+    const ptailX  = -(prx + r * 0.16);
+    const pheadX  =  prx * 0.80;
+    const pheadTip = prx + r * 0.40;
+    const tailShiftP = (this._bendTail || 0) * prx * 0.42;
+    const midShiftP  = (this._bendMid  || 0) * prx * 0.18;
+    const ptailW = pry * 0.46;
+
+    ctx.fillStyle   = hslaCSS(bHue, 75, 75, 0.95);
+    ctx.strokeStyle = hslaCSS(bHue, 80, 85, 0.6);
+    ctx.lineWidth = Math.max(0.8, r * 0.038);
     ctx.beginPath();
-    if (bodyShape === 'oval')      ctx.ellipse(0, 0, r*1.2, r*0.78, 0, 0, TAU);
-    else if (bodyShape === 'long') ctx.ellipse(0, 0, r*1.45, r*0.62, 0, 0, TAU);
-    else if (bodyShape === 'soft') {
-      const st = (performance.now() * 0.002) % 1;
-      for (let i = 0; i < 12; i++) {
-        const a = i/12*TAU; const rr = r*(0.92+Math.sin(a*3+st*6)*0.08);
-        if (i===0) ctx.moveTo(Math.cos(a)*rr,Math.sin(a)*rr);
-        else ctx.lineTo(Math.cos(a)*rr,Math.sin(a)*rr);
-      }
-      ctx.closePath();
-    } else {
-      ctx.ellipse(0, 0, r*1.05, r*0.88, 0, 0, TAU);
-    }
+    ctx.moveTo(ptailX, ptailW + tailShiftP);
+    ctx.bezierCurveTo(ptailX * 0.62 + midShiftP * 0.5, pry * 0.72 + tailShiftP * 0.5,
+                      -prx * 0.10 + midShiftP,          pry,
+                       pheadX,                           pry * 0.30);
+    ctx.bezierCurveTo(pheadX * 0.55, pry * 0.60, pheadTip, pry * 0.30, pheadTip, 0);
+    ctx.bezierCurveTo(pheadTip, -pry * 0.30, pheadX * 0.55, -pry * 0.60, pheadX, -pry * 0.30);
+    ctx.bezierCurveTo(-prx * 0.10 - midShiftP, -pry,
+                       ptailX * 0.62 - midShiftP * 0.5, -pry * 0.72 - tailShiftP * 0.5,
+                       ptailX, -(ptailW + tailShiftP));
+    ctx.lineTo(ptailX, ptailW + tailShiftP);
+    ctx.closePath();
     ctx.fill(); ctx.stroke();
 
-    // nucleus
-    ctx.fillStyle = hslaCSS(bodyHue, 70, 50, 0.55);
-    ctx.beginPath(); ctx.arc(r * 0.05, 0, r * 0.32, 0, TAU); ctx.fill();
+    ctx.fillStyle = hslaCSS(bHue, 70, 50, 0.55);
+    ctx.beginPath(); ctx.arc(prx * 0.05, 0, r * 0.32, 0, TAU); ctx.fill();
 
-    // eye (front)
+    const eyeX = pheadX * 0.72, eyeY = -pry * 0.38;
+    ctx.fillStyle = hslaCSS(0, 0, 96, 0.92);
+    ctx.beginPath(); ctx.arc(eyeX, eyeY, r * 0.155, 0, TAU); ctx.fill();
+    ctx.fillStyle = hslaCSS(bHue + 20, 65, 45, 0.90);
+    ctx.beginPath(); ctx.arc(eyeX + r*0.025, eyeY, r * 0.10, 0, TAU); ctx.fill();
+    ctx.fillStyle = hslaCSS(0, 0, 8, 1);
+    ctx.beginPath(); ctx.arc(eyeX + r*0.035, eyeY, r * 0.058, 0, TAU); ctx.fill();
     ctx.fillStyle = hslaCSS(0, 0, 100, 0.85);
-    ctx.beginPath(); ctx.arc(r * 0.4, -r * 0.18, r * 0.13, 0, TAU); ctx.fill();
-    ctx.fillStyle = hslaCSS(0, 0, 0, 1);
-    ctx.beginPath(); ctx.arc(r * 0.43, -r * 0.18, r * 0.06, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(eyeX + r*0.055, eyeY - r*0.038, r * 0.028, 0, TAU); ctx.fill();
 
-    // mutation visuals
+    ctx.strokeStyle = hslaCSS(bHue + 10, 50, 35, 0.55);
+    ctx.lineWidth = Math.max(0.6, r * 0.028);
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(pheadTip - r*0.04, -r*0.055);
+    ctx.lineTo(pheadTip + r*0.02,  r*0.055);
+    ctx.stroke();
+    ctx.lineCap = 'butt';
+
     this.drawMutationParts(ctx, r);
 
     ctx.restore();
@@ -1534,6 +1566,16 @@ class Creature extends Entity {
       this.angle += clamp(d, -turnRate, turnRate);
     }
 
+    // spine-bend physics
+    if (this._spinePrevAngle === undefined) this._spinePrevAngle = this.angle;
+    let _cSpDelta = this.angle - this._spinePrevAngle;
+    if (_cSpDelta > Math.PI) _cSpDelta -= TAU;
+    if (_cSpDelta < -Math.PI) _cSpDelta += TAU;
+    this._spinePrevAngle = this.angle;
+    const _cBendTarget = clamp(_cSpDelta / Math.max(0.008, dt) * 0.055, -0.85, 0.85);
+    this._bendMid  = lerp(this._bendMid  || 0, _cBendTarget, Math.min(1, dt * 4.5));
+    this._bendTail = lerp(this._bendTail || 0, this._bendMid, Math.min(1, dt * 2.8));
+
     this.scared = Math.max(0, this.scared - dt * 0.4);
     this.angry = Math.max(0, this.angry - dt * 0.2);
     this.attackCD = Math.max(0, this.attackCD - dt);
@@ -1891,37 +1933,61 @@ class Creature extends Entity {
       ctx.scale(1 + hitMorph, 1 - hitMorph * 0.6);
     }
 
-    // body shape
+    // body — fish-body bezier silhouette with spine-bend
     const bodyHue = lerp(this.hue, 0, clamp(this.hitFlash * 0.6, 0, 1));
     const bodySat = lerp(this.sat, 85, clamp(this.hitFlash * 0.7, 0, 1));
     const bodyLight = lerp(this.light, 62, clamp(this.hitFlash * 0.55, 0, 1));
-    ctx.fillStyle = hslaCSS(bodyHue, bodySat, bodyLight, 0.9 * deathFade);
-    ctx.strokeStyle = hslaCSS(this.hue, this.sat, Math.min(100, this.light + 18), 0.75 * deathFade);
-    ctx.lineWidth = 1.1;
-    if (this.body === 'oval') {
-      ctx.beginPath(); ctx.ellipse(0, 0, wr * 1.2, wr * 0.78, 0, 0, TAU); ctx.fill(); ctx.stroke();
-    } else if (this.body === 'long') {
-      ctx.beginPath(); ctx.ellipse(0, 0, wr * 1.45, wr * 0.62, 0, 0, TAU); ctx.fill(); ctx.stroke();
-    } else if (this.body === 'soft') {
-      ctx.beginPath();
-      const t = (performance.now() * 0.002 + this.bornAt) % 1;
-      for (let i = 0; i < 12; i++) {
-        const a = i / 12 * TAU;
-        const rr = wr * (0.92 + Math.sin(a * 3 + t * 6) * 0.08);
-        const x = Math.cos(a) * rr, y = Math.sin(a) * rr;
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }
-      ctx.closePath();
-      ctx.fill(); ctx.stroke();
-    } else {
-      ctx.beginPath(); ctx.arc(0, 0, wr, 0, TAU); ctx.fill(); ctx.stroke();
-    }
+    const gLevelC = this.growthLevel || 0;
+    const spineExtC = 1 + Math.min(gLevelC, 9) * 0.022;   // spine visibly extends with growth level
+    const cmotion = clamp(Math.hypot(this.vx || 0, this.vy || 0) / Math.max(1, this.maxSpeed), 0, 1);
+    const crx = wr * (this.body==='long'?1.38:this.body==='oval'?1.14:this.body==='soft'?0.96:1.04) * spineExtC * (1 + cmotion * 0.07);
+    const cry = wr * (this.body==='long'?0.60:this.body==='oval'?0.80:this.body==='soft'?0.94:0.80) * (1 + Math.min(gLevelC, 9) * 0.006) * (1 - cmotion * 0.04);
+    const ctailX  = -(crx + r * 0.16);
+    const cheadX  =  crx * 0.80;
+    const cheadTip = crx + r * 0.40;
+    const tailShiftC = (this._bendTail || 0) * crx * 0.42;
+    const midShiftC  = (this._bendMid  || 0) * crx * 0.18;
+    const ctailW = cry * 0.46;
 
-    // nucleus
+    ctx.fillStyle   = hslaCSS(bodyHue, bodySat, bodyLight, 0.9 * deathFade);
+    ctx.strokeStyle = hslaCSS(this.hue, this.sat, Math.min(100, this.light + 18), 0.75 * deathFade);
+    ctx.lineWidth   = Math.max(0.8, r * 0.038);
+    ctx.beginPath();
+    ctx.moveTo(ctailX, ctailW + tailShiftC);
+    ctx.bezierCurveTo(ctailX * 0.62 + midShiftC * 0.5, cry * 0.72 + tailShiftC * 0.5,
+                      -crx * 0.10 + midShiftC,          cry,
+                       cheadX,                           cry * 0.30);
+    ctx.bezierCurveTo(cheadX * 0.55, cry * 0.60, cheadTip, cry * 0.30, cheadTip, 0);
+    ctx.bezierCurveTo(cheadTip, -cry * 0.30, cheadX * 0.55, -cry * 0.60, cheadX, -cry * 0.30);
+    ctx.bezierCurveTo(-crx * 0.10 - midShiftC, -cry,
+                       ctailX * 0.62 - midShiftC * 0.5, -cry * 0.72 - tailShiftC * 0.5,
+                       ctailX, -(ctailW + tailShiftC));
+    ctx.lineTo(ctailX, ctailW + tailShiftC);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+
+    const ceyeX = cheadX * 0.72, ceyeY = -cry * 0.38;
+    ctx.fillStyle = hslaCSS(0, 0, 96, 0.88 * deathFade);
+    ctx.beginPath(); ctx.arc(ceyeX, ceyeY, r * 0.145, 0, TAU); ctx.fill();
+    ctx.fillStyle = hslaCSS(this.hue + 20, 65, 45, 0.85 * deathFade);
+    ctx.beginPath(); ctx.arc(ceyeX + r*0.022, ceyeY, r * 0.092, 0, TAU); ctx.fill();
+    ctx.fillStyle = hslaCSS(0, 0, 8, deathFade);
+    ctx.beginPath(); ctx.arc(ceyeX + r*0.032, ceyeY, r * 0.052, 0, TAU); ctx.fill();
+    ctx.fillStyle = hslaCSS(0, 0, 100, 0.82 * deathFade);
+    ctx.beginPath(); ctx.arc(ceyeX + r*0.048, ceyeY - r*0.032, r * 0.024, 0, TAU); ctx.fill();
+
+    ctx.strokeStyle = hslaCSS(this.hue + 10, 50, 35, 0.50 * deathFade);
+    ctx.lineWidth = Math.max(0.5, r * 0.025);
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(cheadTip - r*0.035, -r*0.048);
+    ctx.lineTo(cheadTip + r*0.018,  r*0.048);
+    ctx.stroke();
+    ctx.lineCap = 'butt';
+
     ctx.fillStyle = hslaCSS(this.hue, this.sat - 10, Math.max(20, this.light - 25), 0.4 * deathFade);
     ctx.beginPath(); ctx.arc(0, 0, r * 0.32, 0, TAU); ctx.fill();
 
-    // parts
     for (const part of this.parts) this.drawPart(ctx, part, r, deathFade);
 
     ctx.restore();
