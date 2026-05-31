@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Drift Creature Lab</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #071018;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      .lab-banner {
+        position: fixed;
+        top: 14px;
+        right: 14px;
+        z-index: 20;
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        padding: 10px 14px;
+        border: 1px solid rgba(150, 220, 255, 0.2);
+        border-radius: 999px;
+        background: rgba(4, 10, 16, 0.74);
+        color: #cfe6f2;
+        font: 11px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        backdrop-filter: blur(10px);
+      }
+      .lab-banner strong {
+        color: #5fd6ff;
+        font-weight: 600;
+      }
+      .lab-banner a {
+        color: #fff4a3;
+        text-decoration: none;
+        border-left: 1px solid rgba(150, 220, 255, 0.16);
+        padding-left: 10px;
+      }
+      .lab-banner a:hover {
+        color: #ffffff;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="lab-banner">
+      <strong>Creature Lab</strong>
+      <span>Standalone prototype</span>
+      <a href="home.html">Back to Main Menu</a>
+      <a href="index.html">Open Main Game</a>
+    </div>
+    <canvas id="creatureLabCanvas"></canvas>
+
+    <script src="js/creatures/random.js"></script>
+    <script src="js/creatures/creature-types.js"></script>
+    <script src="js/creatures/creature-genome.js"></script>
+    <script src="js/creatures/creature-physics.js"></script>
+    <script src="js/creatures/creature-parts.js"></script>
+    <script src="js/creatures/creature-growth.js"></script>
+    <script src="js/creatures/creature-movement.js"></script>
+    <script src="js/creatures/creature-ai.js"></script>
+    <script src="js/creatures/creature-renderer.js"></script>
+    <script src="js/creatures/creature.js"></script>
+    <script src="js/creatures/creature-factory.js"></script>
+    <script src="js/creatures/creature-debug.js"></script>
+    <script src="js/scenes/creature-lab-scene.js"></script>
+
+    <script>
+      window.addEventListener("load", function () {
+        window.DriftCreatureLab.init("creatureLabCanvas");
+      });
+    </script>
+  </body>
+</html>

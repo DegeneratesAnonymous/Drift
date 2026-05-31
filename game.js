@@ -1,5 +1,15 @@
 'use strict';
 
+// ── Soft-creature system feature flag ─────────────────────────────────────────
+// Set to true to enable the new physics-based creature system alongside the
+// existing Drift creatures.  Integration hooks are in the main update/render
+// loops below.  The old creature code is NOT removed while this is false.
+window.DRIFT_USE_SOFT_CREATURES = true;
+// Disable prototype authority: NPC visuals are purely cosmetic proxies driven
+// by the legacy simulation.  When true, NPCs run autonomous creature-lab AI
+// which causes them to shoot across the map and swim independently of the game.
+window.DRIFT_USE_SOFT_PROTOTYPE_AUTHORITY = false;
+
 (() => {
 
 // =============================================================================
@@ -105,6 +115,49 @@ function hslaCSS(h, s, l, a) { return `hsla(${h},${s}%,${l}%,${a})`; }
 function shortSeedString(n) { return (n >>> 0).toString(36).toUpperCase().padStart(5, '0').slice(-7); }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CONTROLS — rebindable key mappings, persisted to localStorage
+// ─────────────────────────────────────────────────────────────────────────────
+const Controls = {
+  _key: 'drift.micro-eco.v1.keybinds',
+  defaults: {
+    moveUp:    'w',
+    moveDown:  's',
+    moveLeft:  'a',
+    moveRight: 'd',
+    altUp:    'arrowup',
+    altDown:  'arrowdown',
+    altLeft:  'arrowleft',
+    altRight: 'arrowright',
+    dash:       'shift',
+    slot1:      ' ',
+    slot2:      'e',
+    slot3:      'q',
+    actionMenu: 'x',
+  },
+  bindings: {},
+  load() {
+    try {
+      const s = localStorage.getItem(this._key);
+      const saved = s ? JSON.parse(s) : {};
+      this.bindings = Object.assign({}, this.defaults, saved);
+    } catch (e) { this.bindings = Object.assign({}, this.defaults); }
+  },
+  save() {
+    try { localStorage.setItem(this._key, JSON.stringify(this.bindings)); } catch (e) {}
+  },
+  reset() { this.bindings = Object.assign({}, this.defaults); this.save(); },
+  bind(action, key) { this.bindings[action] = key.toLowerCase(); this.save(); },
+  labelFor(action) {
+    const k = (this.bindings[action] || '').toLowerCase();
+    const map = { ' ': 'Space', 'arrowup': '↑', 'arrowdown': '↓', 'arrowleft': '←', 'arrowright': '→',
+      'shift': 'Shift', 'escape': 'Esc', 'control': 'Ctrl', 'alt': 'Alt', 'enter': 'Enter',
+      'backspace': 'Bksp', 'tab': 'Tab' };
+    return map[k] || k.toUpperCase() || '—';
+  },
+};
+Controls.load();
+
+// ─────────────────────────────────────────────────────────────────────────────
 // INPUT
 // ─────────────────────────────────────────────────────────────────────────────
 const Input = {
@@ -122,9 +175,13 @@ const Input = {
   isMobile: false,
   dashEdge: false,
   pauseEdge: false,
+  actionEdge: { s1: false, s2: false, s3: false },
+  actionMenuEdge: false,
   _lastDash: false,
   _lastPause: false,
   _pausePulse: false,
+  _lastS1: false, _lastS2: false, _lastS3: false,
+  _lastAM: false,
 
   scrollDelta: 0,
 
@@ -134,8 +191,9 @@ const Input = {
     window.addEventListener('keydown', (e) => {
       const k = e.key.toLowerCase();
       this.keys.add(k);
-      if (k === ' ' || k === 'spacebar') this._pausePulse = true;
-      if (k === ' ' || k === 'spacebar' || k === 'escape' || k === 'arrowup' || k === 'arrowdown' || k === 'arrowleft' || k === 'arrowright' || k === 'w' || k === 'a' || k === 's' || k === 'd') {
+      if (k === ' ' || k === 'spacebar' || k === 'e' || k === 'q' || k === 'x' ||
+          k === 'escape' || k === 'arrowup' || k === 'arrowdown' || k === 'arrowleft' || k === 'arrowright' ||
+          k === 'w' || k === 'a' || k === 's' || k === 'd') {
         e.preventDefault();
       }
     });
@@ -223,22 +281,37 @@ const Input = {
   },
 
   tick() {
-    const dash = this.keys.has('shift') || this.touchDashPressed;
+    const B = Controls.bindings;
+    const dash = this.keys.has(B.dash) || this.touchDashPressed;
     this.dashEdge = dash && !this._lastDash;
     this._lastDash = dash;
-    const pause = this.keys.has(' ') || this.keys.has('spacebar') || this.touchPausePressed;
-    this.pauseEdge = this._pausePulse || (pause && !this._lastPause);
+    // Pause is driven by Escape directly in the game keydown handler; touch pause uses this edge.
+    this.pauseEdge = this._pausePulse || (this.touchPausePressed && !this._lastPause);
     this._pausePulse = false;
-    this._lastPause = pause;
+    this._lastPause = this.touchPausePressed;
+    // Action slot edges (Space / E / Q by default, rebindable via Controls).
+    const s1 = this.keys.has(B.slot1) || this.keys.has('spacebar');
+    this.actionEdge.s1 = s1 && !this._lastS1;
+    this._lastS1 = s1;
+    const s2 = this.keys.has(B.slot2);
+    this.actionEdge.s2 = s2 && !this._lastS2;
+    this._lastS2 = s2;
+    const s3 = this.keys.has(B.slot3);
+    this.actionEdge.s3 = s3 && !this._lastS3;
+    this._lastS3 = s3;
+    const am = this.keys.has(B.actionMenu);
+    this.actionMenuEdge = am && !this._lastAM;
+    this._lastAM = am;
   },
 
   axis() {
     if (this.touchActive) return [this.touchX, this.touchY];
     let x = 0, y = 0;
-    if (this.keys.has('a') || this.keys.has('arrowleft'))  x -= 1;
-    if (this.keys.has('d') || this.keys.has('arrowright')) x += 1;
-    if (this.keys.has('w') || this.keys.has('arrowup'))    y -= 1;
-    if (this.keys.has('s') || this.keys.has('arrowdown'))  y += 1;
+    const B = Controls.bindings;
+    if (this.keys.has(B.moveLeft) || this.keys.has(B.altLeft))   x -= 1;
+    if (this.keys.has(B.moveRight) || this.keys.has(B.altRight)) x += 1;
+    if (this.keys.has(B.moveUp) || this.keys.has(B.altUp))       y -= 1;
+    if (this.keys.has(B.moveDown) || this.keys.has(B.altDown))   y += 1;
     const m = Math.hypot(x, y);
     if (m > 1) { x /= m; y /= m; }
     if (m > 0.001) { this.lastAimX = x / m; this.lastAimY = y / m; }
@@ -679,77 +752,77 @@ const MUTATION_BY_ID = Object.fromEntries(MUTATIONS.map(m => [m.id, m]));
 const CREATURE_TEMPLATES = {
   drifter: {
     id: 'drifter', name: 'Drifter',
-    behavior: 'wander', sizeRange: [4, 9], speed: 22, accel: 55,
+    behavior: 'wander', sizeRange: [4, 9], speed: 12, accel: 30,
     hpMul: 0.6, biteDmg: 2, aggression: 0, fearMul: 1.2, hunger: 0.3,
     body: 'soft', parts: ['cilia'], huesShift: 0, swarmy: false,
     food: 'nutrient', xp: 1, diet: 'omnivore'
   },
   grazer: {
     id: 'grazer', name: 'Grazer',
-    behavior: 'graze', sizeRange: [6, 11], speed: 40, accel: 100,
+    behavior: 'graze', sizeRange: [6, 11], speed: 22, accel: 55,
     hpMul: 0.9, biteDmg: 3, aggression: 0, fearMul: 1.0, hunger: 0.5,
     body: 'round', parts: ['cilia', 'eyespot'], huesShift: 20, swarmy: false,
     food: 'nutrient', xp: 2, diet: 'herbivore'
   },
   swarmer: {
     id: 'swarmer', name: 'Swarmer',
-    behavior: 'swarm', sizeRange: [3, 5], speed: 65, accel: 165,
+    behavior: 'swarm', sizeRange: [3, 5], speed: 36, accel: 92,
     hpMul: 0.4, biteDmg: 4, aggression: 0.5, fearMul: 0.5, hunger: 0.6,
     body: 'oval', parts: ['tail'], huesShift: -10, swarmy: true,
     food: 'nutrient', xp: 1, diet: 'omnivore'
   },
   darter: {
     id: 'darter', name: 'Darter',
-    behavior: 'darter', sizeRange: [7, 12], speed: 95, accel: 240,
+    behavior: 'darter', sizeRange: [7, 12], speed: 52, accel: 130,
     hpMul: 0.7, biteDmg: 6, aggression: 0.3, fearMul: 0.8, hunger: 0.5,
     body: 'oval', parts: ['tail', 'eyespot'], huesShift: 30, swarmy: false,
     food: 'meat_small', xp: 3, diet: 'carnivore'
   },
   small_hunter: {
     id: 'small_hunter', name: 'Hunter',
-    behavior: 'hunt', sizeRange: [10, 16], speed: 65, accel: 165,
+    behavior: 'hunt', sizeRange: [10, 16], speed: 36, accel: 92,
     hpMul: 1.2, biteDmg: 10, aggression: 0.7, fearMul: 0.7, hunger: 0.7,
     body: 'oval', parts: ['tail', 'eyespot', 'fin'], huesShift: 0, swarmy: false,
     food: 'meat_small', xp: 5, diet: 'carnivore'
   },
   ambusher: {
     id: 'ambusher', name: 'Lurker',
-    behavior: 'ambush', sizeRange: [11, 18], speed: 38, accel: 290,
+    behavior: 'ambush', sizeRange: [11, 18], speed: 21, accel: 160,
     hpMul: 1.4, biteDmg: 16, aggression: 0.9, fearMul: 0.4, hunger: 0.6,
     body: 'long', parts: ['spike', 'eyespot'], huesShift: -30, swarmy: false,
     food: 'meat_small', xp: 6, diet: 'carnivore'
   },
   territorial: {
     id: 'territorial', name: 'Sentinel',
-    behavior: 'territorial', sizeRange: [12, 20], speed: 44, accel: 135,
+    behavior: 'territorial', sizeRange: [12, 20], speed: 24, accel: 76,
     hpMul: 1.5, biteDmg: 12, aggression: 0.95, fearMul: 0.5, hunger: 0.3,
     body: 'round', parts: ['spike', 'spike', 'eyespot'], huesShift: 10, swarmy: false,
     food: 'meat_small', xp: 7, diet: 'omnivore'
   },
   scavenger: {
     id: 'scavenger', name: 'Scavenger',
-    behavior: 'scavenge', sizeRange: [9, 14], speed: 55, accel: 135,
+    behavior: 'scavenge', sizeRange: [9, 14], speed: 30, accel: 76,
     hpMul: 0.8, biteDmg: 5, aggression: 0.2, fearMul: 0.9, hunger: 0.8,
     body: 'oval', parts: ['tail', 'eyespot'], huesShift: 40, swarmy: false,
     food: 'meat_any', xp: 3, diet: 'omnivore'
   },
   armored: {
     id: 'armored', name: 'Plated One',
-    behavior: 'territorial', sizeRange: [14, 22], speed: 33, accel: 100,
+    behavior: 'territorial', sizeRange: [14, 22], speed: 18, accel: 56,
     hpMul: 2.2, biteDmg: 14, aggression: 0.7, fearMul: 0.3, hunger: 0.4,
     body: 'round', parts: ['plate', 'plate', 'eyespot'], huesShift: 20, swarmy: false,
     food: 'nutrient', xp: 8, diet: 'herbivore'
   },
   apex: {
     id: 'apex', name: 'Devourer',
-    behavior: 'hunt', sizeRange: [22, 38], speed: 70, accel: 195,
+    behavior: 'hunt', sizeRange: [22, 38], speed: 38, accel: 108,
     hpMul: 3.0, biteDmg: 32, aggression: 1.0, fearMul: 0.2, hunger: 0.6,
     body: 'long', parts: ['tail', 'fin', 'eyespot', 'mandible'], huesShift: -20, swarmy: false,
     food: 'meat_small', xp: 18, diet: 'carnivore'
   },
   parasite: {
     id: 'parasite', name: 'Parasite',
-    behavior: 'parasite', sizeRange: [4, 7], speed: 82, accel: 210,
+    behavior: 'parasite', sizeRange: [4, 7], speed: 45, accel: 118,
     hpMul: 0.3, biteDmg: 3, aggression: 0.6, fearMul: 0.6, hunger: 0.9,
     body: 'oval', parts: ['spike'], huesShift: 60, swarmy: false,
     food: 'meat_any', xp: 2, diet: 'carnivore'
@@ -1008,6 +1081,15 @@ class Player extends Entity {
       const tr = T.PLAYER_TURN_RATE * this.stats.turnMul;
       this.angle += clamp(d, -tr * dt, tr * dt);
     }
+    // spine-bend physics
+    if (this._spinePrevAngle === undefined) this._spinePrevAngle = this.angle;
+    let _spDelta = this.angle - this._spinePrevAngle;
+    if (_spDelta > Math.PI) _spDelta -= TAU;
+    if (_spDelta < -Math.PI) _spDelta += TAU;
+    this._spinePrevAngle = this.angle;
+    const _pBendTarget = clamp(_spDelta / Math.max(0.008, dt) * 0.055, -0.85, 0.85);
+    this._bendMid  = lerp(this._bendMid  || 0, _pBendTarget, Math.min(1, dt * 5.5));
+    this._bendTail = lerp(this._bendTail || 0, this._bendMid, Math.min(1, dt * 3.2));
 
     // spine-bend physics
     if (this._spinePrevAngle === undefined) this._spinePrevAngle = this.angle;
@@ -1131,7 +1213,7 @@ class Player extends Entity {
     ctx.fillStyle = grad;
     ctx.beginPath(); ctx.arc(sx, sy, glowR, 0, TAU); ctx.fill();
 
-    // body — fish-body bezier silhouette with spine-bend
+  // body - fish-body bezier silhouette with spine-bend
     ctx.save();
     ctx.translate(sx, sy);
     ctx.rotate(this.angle);
@@ -1194,7 +1276,6 @@ class Player extends Entity {
     this.drawMutationParts(ctx, r);
 
     ctx.restore();
-
     if (this.politeBubbleT > 0 && this.politeBubbleText) {
       const alpha = clamp(this.politeBubbleT / 0.9, 0, 1);
       const tx = sx;
@@ -1217,127 +1298,181 @@ class Player extends Entity {
 
   drawMutationParts(ctx, r) {
     const has = (id) => this.mutations.includes(id);
+    const bShape = this.creatorBody || 'round';
+    const bHue   = this.creatorHue !== undefined ? this.creatorHue : 195;
+    const gs     = 1 + (this.r - T.PLAYER_START_SIZE) * 0.018;
+    const motion = clamp(Math.hypot(this.vx || 0, this.vy || 0) / Math.max(1, this.speed), 0, 1);
+    const prx    = r * (bShape==='long'?1.38:bShape==='oval'?1.14:bShape==='soft'?0.96:1.04) * gs * (1 + motion * 0.07);
+    const pry    = r * (bShape==='long'?0.60:bShape==='oval'?0.80:bShape==='soft'?0.94:0.80) * gs * (1 - motion * 0.04);
+    const ptailX  = -(prx + r * 0.16);
+    const pheadX  =  prx * 0.80;
+    const pheadTip = prx + r * 0.40;
+
     if (has('spikes')) {
-      ctx.strokeStyle = hslaCSS(40, 30, 80, 0.9);
-      ctx.lineWidth = 1.6;
-      for (let i = 0; i < 8; i++) {
-        const a = i / 8 * TAU;
-        const x1 = Math.cos(a) * r * 0.9;
-        const y1 = Math.sin(a) * r * 0.78;
-        const x2 = Math.cos(a) * r * 1.55;
-        const y2 = Math.sin(a) * r * 1.35;
-        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      ctx.fillStyle   = hslaCSS(bHue - 15, 55, 58, 0.85);
+      ctx.strokeStyle = hslaCSS(bHue - 10, 50, 72, 0.45);
+      ctx.lineWidth = Math.max(0.5, r * 0.025) * gs;
+      for (let i = 0; i < 5; i++) {
+        const bx = lerp(ptailX * 0.40, pheadX * 0.55, i / 4);
+        const h  = r * (0.55 - Math.abs(i - 2) * 0.07) * gs;
+        ctx.beginPath();
+        ctx.moveTo(bx - r*0.07*gs, -pry * 0.92);
+        ctx.lineTo(bx,              -(pry * 0.92 + h));
+        ctx.lineTo(bx + r*0.07*gs, -pry * 0.92);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
       }
     }
     if (has('armor') || has('plates')) {
-      ctx.strokeStyle = hslaCSS(200, 30, 65, 0.6);
-      ctx.lineWidth = 1.3;
-      ctx.beginPath(); ctx.ellipse(0, 0, r * 1.18, r * 1.0, 0, 0, TAU); ctx.stroke();
-      for (let i = 0; i < 4; i++) {
-        const a = -Math.PI / 2 + (i - 1.5) * 0.4;
+      ctx.strokeStyle = hslaCSS(bHue + 10, 30, 72, 0.55);
+      ctx.lineWidth = Math.max(0.8, r * 0.045) * gs;
+      for (const sy2 of [-1, 1]) {
         ctx.beginPath();
-        ctx.arc(0, 0, r * 1.1, a, a + 0.25);
+        ctx.ellipse(0, sy2 * pry * 0.72, prx * 0.52, pry * 0.22, 0, 0, TAU);
         ctx.stroke();
       }
     }
     if (has('eyes')) {
-      const positions = [[-0.35, -0.45], [-0.6, -0.05], [-0.35, 0.45]];
-      for (const [px, py] of positions) {
-        ctx.fillStyle = hslaCSS(0, 0, 100, 0.85);
-        ctx.beginPath(); ctx.arc(px * r, py * r, r * 0.1, 0, TAU); ctx.fill();
-        ctx.fillStyle = hslaCSS(0, 0, 0, 1);
-        ctx.beginPath(); ctx.arc(px * r, py * r, r * 0.045, 0, TAU); ctx.fill();
+      const offsets = [[-0.38, -0.42], [-0.62, -0.06], [-0.38, 0.42]];
+      for (const [px2, py2] of offsets) {
+        const ex2 = px2 * r * gs, ey2 = py2 * pry;
+        ctx.fillStyle = hslaCSS(0, 0, 96, 0.90);
+        ctx.beginPath(); ctx.arc(ex2, ey2, r * 0.115 * gs, 0, TAU); ctx.fill();
+        ctx.strokeStyle = hslaCSS(bHue + 20, 60, 45, 0.75);
+        ctx.lineWidth = r * 0.040 * gs;
+        ctx.beginPath(); ctx.arc(ex2 + r*0.018*gs, ey2, r * 0.070 * gs, 0, TAU); ctx.stroke();
+        ctx.fillStyle = hslaCSS(0, 0, 8, 1);
+        ctx.beginPath(); ctx.arc(ex2 + r*0.025*gs, ey2, r * 0.040 * gs, 0, TAU); ctx.fill();
       }
     }
     if (has('glow')) {
-      const grad = ctx.createRadialGradient(0, 0, r * 0.4, 0, 0, r * 3);
-      grad.addColorStop(0, hslaCSS(55, 90, 75, 0.22));
-      grad.addColorStop(1, hslaCSS(55, 90, 60, 0));
+      const grad = ctx.createRadialGradient(0, 0, r * 0.35 * gs, 0, 0, r * 3 * gs);
+      grad.addColorStop(0, hslaCSS(55, 88, 75, 0.22));
+      grad.addColorStop(1, hslaCSS(55, 88, 60, 0));
       ctx.fillStyle = grad;
-      ctx.beginPath(); ctx.arc(0, 0, r * 3, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.arc(0, 0, r * 3 * gs, 0, TAU); ctx.fill();
     }
     if (has('jet')) {
-      ctx.fillStyle = hslaCSS(190, 80, 70, 0.6);
+      const jg = ctx.createLinearGradient(ptailX * 1.05, 0, ptailX * 1.65, 0);
+      jg.addColorStop(0, hslaCSS(190, 85, 72, 0.72));
+      jg.addColorStop(1, hslaCSS(190, 85, 72, 0));
+      ctx.fillStyle = jg;
       ctx.beginPath();
-      ctx.moveTo(-r * 0.9, -r * 0.3);
-      ctx.lineTo(-r * 1.6, 0);
-      ctx.lineTo(-r * 0.9, r * 0.3);
+      ctx.moveTo(ptailX, -pry * 0.30);
+      ctx.lineTo(ptailX * 1.60, 0);
+      ctx.lineTo(ptailX,  pry * 0.30);
       ctx.closePath();
       ctx.fill();
     }
     if (has('venom')) {
-      ctx.fillStyle = hslaCSS(110, 70, 55, 0.7);
-      ctx.beginPath(); ctx.arc(r * 0.55, 0, r * 0.18, 0, TAU); ctx.fill();
+      ctx.fillStyle = hslaCSS(110, 72, 55, 0.78);
+      ctx.strokeStyle = hslaCSS(110, 60, 38, 0.55);
+      ctx.lineWidth = Math.max(0.5, r * 0.022) * gs;
+      ctx.beginPath();
+      ctx.moveTo(pheadTip, 0);
+      ctx.lineTo(pheadTip + r*0.28*gs, -r*0.11*gs);
+      ctx.lineTo(pheadTip + r*0.22*gs,  r*0.11*gs);
+      ctx.closePath();
+      ctx.fill(); ctx.stroke();
     }
     if (has('filter')) {
-      ctx.strokeStyle = hslaCSS(180, 50, 75, 0.5);
-      ctx.lineWidth = 0.9;
-      for (let i = 0; i < 7; i++) {
-        const a = -Math.PI * 0.45 + i * 0.15;
-        ctx.beginPath();
-        ctx.moveTo(r * 0.8, 0);
-        ctx.lineTo(r * 1.6 * Math.cos(a) + r * 0.4, r * 1.0 * Math.sin(a));
-        ctx.stroke();
+      ctx.strokeStyle = hslaCSS(bHue + 15, 60, 80, 0.55);
+      ctx.lineWidth = Math.max(0.5, r * 0.030) * gs;
+      ctx.lineCap = 'round';
+      for (const side of [-1, 1]) {
+        for (let i = 0; i < 7; i++) {
+          const a = side * (-Math.PI * 0.42 + i * (Math.PI * 0.84 / 6));
+          ctx.beginPath();
+          ctx.moveTo(pheadX * 0.85, side * r * 0.10 * gs);
+          ctx.quadraticCurveTo(pheadX * 0.95 + r*0.22*gs*Math.cos(a), side*r*0.28*gs*Math.sin(Math.abs(a)),
+                                pheadX * 0.90 + r*0.55*gs*Math.cos(a), side*r*0.55*gs*Math.sin(Math.abs(a)));
+          ctx.stroke();
+        }
       }
+      ctx.lineCap = 'butt';
     }
     if (has('mandibles')) {
-      ctx.fillStyle = hslaCSS(30, 30, 80, 0.85);
-      ctx.beginPath();
-      ctx.moveTo(r * 0.9, -r * 0.3);
-      ctx.quadraticCurveTo(r * 1.5, -r * 0.15, r * 1.3, 0);
-      ctx.quadraticCurveTo(r * 1.5, r * 0.15, r * 0.9, r * 0.3);
-      ctx.closePath();
-      ctx.fill();
+      ctx.fillStyle   = hslaCSS(bHue - 20, 38, 72, 0.82);
+      ctx.strokeStyle = hslaCSS(bHue - 15, 32, 58, 0.45);
+      ctx.lineWidth = Math.max(0.5, r * 0.028) * gs;
+      for (const side of [-1, 1]) {
+        ctx.beginPath();
+        ctx.moveTo(pheadX * 0.92, side * r * 0.22 * gs);
+        ctx.bezierCurveTo(pheadX * 1.15, side * r * 0.40 * gs,
+                          pheadTip * 0.95, side * r * 0.52 * gs,
+                          pheadTip * 0.90, side * r * 0.18 * gs);
+        ctx.bezierCurveTo(pheadTip * 0.95, side * r * 0.04 * gs,
+                          pheadX * 1.08,   side * r * 0.04 * gs,
+                          pheadX * 0.92,   side * r * 0.22 * gs);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+      }
     }
     if (has('fins')) {
-      ctx.fillStyle = hslaCSS(195, 70, 70, 0.55);
-      ctx.beginPath();
-      ctx.moveTo(-r * 0.1, -r * 0.85);
-      ctx.quadraticCurveTo(-r * 0.6, -r * 1.4, -r * 0.9, -r * 0.6);
-      ctx.lineTo(-r * 0.4, -r * 0.7);
-      ctx.closePath();
-      ctx.fill();
-      ctx.beginPath();
-      ctx.moveTo(-r * 0.1, r * 0.85);
-      ctx.quadraticCurveTo(-r * 0.6, r * 1.4, -r * 0.9, r * 0.6);
-      ctx.lineTo(-r * 0.4, r * 0.7);
-      ctx.closePath();
-      ctx.fill();
+      ctx.fillStyle   = hslaCSS(bHue, 62, 74, 0.52);
+      ctx.strokeStyle = hslaCSS(bHue, 58, 62, 0.40);
+      ctx.lineWidth = Math.max(0.5, r * 0.022) * gs;
+      for (const side of [-1, 1]) {
+        const bx2 = -prx * 0.08, by2 = side * pry * 0.88;
+        const tx2 = -prx * 0.48, ty2 = side * pry * 1.65;
+        const ex2 = prx * 0.30,  ey2 = side * pry * 0.90;
+        ctx.beginPath();
+        ctx.moveTo(bx2, by2);
+        ctx.bezierCurveTo(bx2 - r*0.10*gs, side*pry*1.15, tx2 - r*0.06*gs, side*pry*1.48, tx2, ty2);
+        ctx.bezierCurveTo(tx2 + r*0.16*gs, side*pry*1.32, ex2 - r*0.04*gs, side*pry*1.02, ex2, ey2);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        ctx.strokeStyle = hslaCSS(bHue, 58, 58, 0.28);
+        ctx.lineWidth = Math.max(0.4, r * 0.015) * gs;
+        for (let v = 1; v <= 3; v++) {
+          const vt = v / 4;
+          ctx.beginPath();
+          ctx.moveTo(lerp(bx2, tx2, vt*0.55), lerp(by2, ty2, vt*0.55));
+          ctx.lineTo(lerp(bx2, ex2, vt*0.72), lerp(by2, ey2, vt*0.72));
+          ctx.stroke();
+        }
+        ctx.strokeStyle = hslaCSS(bHue, 58, 62, 0.40);
+        ctx.lineWidth = Math.max(0.5, r * 0.022) * gs;
+      }
     }
     if (has('camo')) {
-      ctx.fillStyle = hslaCSS(195, 30, 50, 0.18);
-      ctx.beginPath(); ctx.arc(0, 0, r * 1.6, 0, TAU); ctx.fill();
+      ctx.fillStyle = hslaCSS(bHue, 28, 50, 0.16);
+      ctx.beginPath(); ctx.arc(0, 0, prx * 1.05, 0, TAU); ctx.fill();
     }
     if (has('predator_sense')) {
-      ctx.strokeStyle = hslaCSS(280, 80, 70, 0.25);
-      ctx.lineWidth = 0.8;
-      ctx.beginPath(); ctx.arc(0, 0, r * 2.4, 0, TAU); ctx.stroke();
+      ctx.strokeStyle = hslaCSS(280, 78, 72, 0.22);
+      ctx.lineWidth = Math.max(0.6, r * 0.028) * gs;
+      ctx.beginPath(); ctx.arc(0, 0, r * 2.4 * gs, 0, TAU); ctx.stroke();
     }
 
     if (this.evolvedParts && this.evolvedParts.length > 0) {
       if (this.evolvedParts.includes('frill')) {
-        ctx.strokeStyle = hslaCSS((this.creatorHue || 190) + 25, 65, 78, 0.5);
-        ctx.lineWidth = 1;
-        for (let i = 0; i < 6; i++) {
-          const a = -Math.PI * 0.7 + i * 0.22;
+        ctx.strokeStyle = hslaCSS((bHue) + 25, 62, 78, 0.50);
+        ctx.lineWidth = Math.max(0.6, r * 0.028) * gs;
+        for (let i = 0; i < 7; i++) {
+          const a = -Math.PI * 0.68 + i * 0.20;
+          const ir = r * 0.92 * gs, or2 = r * 1.32 * gs;
           ctx.beginPath();
-          ctx.moveTo(Math.cos(a) * r * 0.95, Math.sin(a) * r * 0.78);
-          ctx.lineTo(Math.cos(a) * r * 1.28, Math.sin(a) * r * 0.98);
+          ctx.moveTo(Math.cos(a) * ir, Math.sin(a) * ir);
+          ctx.lineTo(Math.cos(a) * or2, Math.sin(a) * or2);
           ctx.stroke();
         }
       }
       if (this.evolvedParts.includes('tendril')) {
-        ctx.strokeStyle = hslaCSS(this.creatorHue || 190, 45, 72, 0.52);
-        ctx.lineWidth = 0.9;
-        const t = Math.sin(performance.now() * 0.006 + this.totalTime * 0.8) * r * 0.28;
-        ctx.beginPath();
-        ctx.moveTo(-r * 0.85, -r * 0.12);
-        ctx.bezierCurveTo(-r * 1.2, -r * 0.2 + t * 0.2, -r * 1.55, -r * 0.28, -r * 1.9, -r * 0.15 + t);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(-r * 0.85, r * 0.12);
-        ctx.bezierCurveTo(-r * 1.2, r * 0.2 - t * 0.2, -r * 1.55, r * 0.28, -r * 1.9, r * 0.15 - t);
-        ctx.stroke();
+        ctx.strokeStyle = hslaCSS(bHue, 45, 72, 0.50);
+        ctx.lineWidth = Math.max(0.5, r * 0.025) * gs;
+        ctx.lineCap = 'round';
+        for (const side of [-1, 1]) {
+          const w1 = Math.sin(performance.now() * 0.006 + this.totalTime * 0.8) * r * 0.30 * gs;
+          const w2 = Math.sin(performance.now() * 0.0045 + this.totalTime * 0.5 + 1.8) * r * 0.24 * gs;
+          ctx.beginPath();
+          ctx.moveTo(ptailX * 0.88, side * r * 0.18 * gs);
+          ctx.bezierCurveTo(ptailX * 1.22, side * r * 0.32 * gs + w1 * 0.25,
+                            ptailX * 1.55, side * r * 0.42 * gs - w1 * 0.20,
+                            ptailX * 1.90, side * r * 0.30 * gs + w2);
+          ctx.stroke();
+        }
+        ctx.lineCap = 'butt';
       }
     }
   }
@@ -1565,6 +1700,15 @@ class Creature extends Entity {
       const turnRate = (2.6 - clamp(this.r / 42, 0, 0.95)) * dt;
       this.angle += clamp(d, -turnRate, turnRate);
     }
+    // spine-bend physics
+    if (this._spinePrevAngle === undefined) this._spinePrevAngle = this.angle;
+    let _cSpDelta = this.angle - this._spinePrevAngle;
+    if (_cSpDelta > Math.PI) _cSpDelta -= TAU;
+    if (_cSpDelta < -Math.PI) _cSpDelta += TAU;
+    this._spinePrevAngle = this.angle;
+    const _cBendTarget = clamp(_cSpDelta / Math.max(0.008, dt) * 0.055, -0.85, 0.85);
+    this._bendMid  = lerp(this._bendMid  || 0, _cBendTarget, Math.min(1, dt * 4.5));
+    this._bendTail = lerp(this._bendTail || 0, this._bendMid, Math.min(1, dt * 2.8));
 
     // spine-bend physics
     if (this._spinePrevAngle === undefined) this._spinePrevAngle = this.angle;
@@ -1933,7 +2077,7 @@ class Creature extends Entity {
       ctx.scale(1 + hitMorph, 1 - hitMorph * 0.6);
     }
 
-    // body — fish-body bezier silhouette with spine-bend
+  // body - fish-body bezier silhouette with spine-bend
     const bodyHue = lerp(this.hue, 0, clamp(this.hitFlash * 0.6, 0, 1));
     const bodySat = lerp(this.sat, 85, clamp(this.hitFlash * 0.7, 0, 1));
     const bodyLight = lerp(this.light, 62, clamp(this.hitFlash * 0.55, 0, 1));
@@ -1948,7 +2092,6 @@ class Creature extends Entity {
     const tailShiftC = (this._bendTail || 0) * crx * 0.42;
     const midShiftC  = (this._bendMid  || 0) * crx * 0.18;
     const ctailW = cry * 0.46;
-
     ctx.fillStyle   = hslaCSS(bodyHue, bodySat, bodyLight, 0.9 * deathFade);
     ctx.strokeStyle = hslaCSS(this.hue, this.sat, Math.min(100, this.light + 18), 0.75 * deathFade);
     ctx.lineWidth   = Math.max(0.8, r * 0.038);
@@ -2018,109 +2161,173 @@ class Creature extends Entity {
 
   drawPart(ctx, part, r, fade) {
     switch (part) {
-      case 'cilia':
-        ctx.strokeStyle = hslaCSS(this.hue, this.sat - 20, this.light + 5, 0.4 * fade);
-        ctx.lineWidth = 0.8;
-        for (let i = 0; i < 10; i++) {
-          const a = i / 10 * TAU;
+      case 'cilia': {
+        ctx.strokeStyle = hslaCSS(this.hue, this.sat, this.light + 10, 0.5 * fade);
+        ctx.lineWidth = Math.max(0.6, r * 0.055);
+        ctx.lineCap = 'round';
+        for (let i = 0; i < 14; i++) {
+          const a = i / 14 * TAU;
+          const t = Math.sin(performance.now() * 0.0045 + this.bornAt * 5 + i * 1.1) * r * 0.28;
           ctx.beginPath();
-          ctx.moveTo(Math.cos(a) * r * 0.95, Math.sin(a) * r * 0.78);
-          ctx.lineTo(Math.cos(a) * r * 1.25, Math.sin(a) * r * 1.0);
+          ctx.moveTo(Math.cos(a) * r * 0.88, Math.sin(a) * r * 0.88);
+          ctx.lineTo(Math.cos(a) * r * 1.55 + t * Math.sin(a + 1.2),
+                     Math.sin(a) * r * 1.55 - t * Math.cos(a + 1.2));
           ctx.stroke();
         }
-        break;
-      case 'tail': {
-        const t = Math.sin(performance.now() * 0.008 + this.bornAt * 10) * 0.4;
-        ctx.fillStyle = hslaCSS(this.hue, this.sat, this.light, 0.6 * fade);
-        ctx.beginPath();
-        ctx.moveTo(-r * 1.0, -r * 0.18);
-        ctx.quadraticCurveTo(-r * 1.6, t * r, -r * 1.9, -r * 0.05);
-        ctx.lineTo(-r * 1.8, r * 0.05);
-        ctx.quadraticCurveTo(-r * 1.6, t * r + r * 0.2, -r * 1.0, r * 0.18);
-        ctx.closePath();
-        ctx.fill();
+        ctx.lineCap = 'butt';
         break;
       }
-      case 'eyespot':
-        ctx.fillStyle = hslaCSS(0, 0, 100, 0.85 * fade);
-        ctx.beginPath(); ctx.arc(r * 0.55, -r * 0.2, r * 0.13, 0, TAU); ctx.fill();
-        ctx.fillStyle = hslaCSS(0, 0, 0, fade);
-        ctx.beginPath(); ctx.arc(r * 0.58, -r * 0.2, r * 0.06, 0, TAU); ctx.fill();
+      case 'tail': {
+        const fl = r * 0.82, fw = r * 0.70;
+        ctx.fillStyle = hslaCSS(this.hue, this.sat - 8, this.light + 12, 0.78 * fade);
+        ctx.strokeStyle = hslaCSS(this.hue, this.sat, this.light + 20, 0.5 * fade);
+        ctx.lineWidth = Math.max(0.6, r * 0.03);
+        for (const lobe of [-1, 1]) {
+          ctx.beginPath();
+          ctx.moveTo(-r * 0.85, lobe * r * 0.10);
+          ctx.bezierCurveTo(-r * 1.05, lobe * fw * 0.55, -r * 1.30 - fl * 0.55, lobe * fw * 0.90, -(r * 0.85 + fl), lobe * fw);
+          ctx.bezierCurveTo(-(r * 0.85 + fl * 0.60), lobe * fw * 0.55, -r * 1.05, lobe * r * 0.20, -r * 0.85, lobe * r * 0.10);
+          ctx.closePath();
+          ctx.fill(); ctx.stroke();
+        }
         break;
-      case 'spike':
-        ctx.strokeStyle = hslaCSS(this.hue, 20, 85, 0.85 * fade);
-        ctx.lineWidth = 1.4;
+      }
+      case 'eyespot': {
+        const ex = r * 0.52, ey = -r * 0.40;
+        ctx.fillStyle = hslaCSS(0, 0, 96, 0.90 * fade);
+        ctx.beginPath(); ctx.arc(ex, ey, r * 0.22, 0, TAU); ctx.fill();
+        ctx.strokeStyle = hslaCSS(this.hue + 25, 70, 50, 0.80 * fade);
+        ctx.lineWidth = r * 0.055;
+        ctx.beginPath(); ctx.arc(ex, ey, r * 0.135, 0, TAU); ctx.stroke();
+        ctx.fillStyle = hslaCSS(0, 0, 8, fade);
+        ctx.beginPath(); ctx.arc(ex + r*0.028, ey, r * 0.080, 0, TAU); ctx.fill();
+        ctx.fillStyle = hslaCSS(0, 0, 100, 0.80 * fade);
+        ctx.beginPath(); ctx.arc(ex + r*0.058, ey - r*0.045, r * 0.032, 0, TAU); ctx.fill();
+        break;
+      }
+      case 'spike': {
+        ctx.fillStyle = hslaCSS(this.hue - 15, this.sat + 10, this.light - 15, 0.82 * fade);
+        ctx.strokeStyle = hslaCSS(this.hue - 10, this.sat, this.light, 0.45 * fade);
+        ctx.lineWidth = Math.max(0.5, r * 0.025);
         for (let i = 0; i < 5; i++) {
-          const a = -0.5 + i * 0.25;
+          const bx = (i - 2) * r * 0.30;
+          const h = r * (0.60 - Math.abs(i - 2) * 0.08);
           ctx.beginPath();
-          ctx.moveTo(Math.cos(a) * r * 0.9, Math.sin(a) * r * 0.85);
-          ctx.lineTo(Math.cos(a) * r * 1.6, Math.sin(a) * r * 1.45);
-          ctx.stroke();
+          ctx.moveTo(bx - r * 0.07, -r * 0.88);
+          ctx.lineTo(bx, -(r * 0.88 + h));
+          ctx.lineTo(bx + r * 0.07, -r * 0.88);
+          ctx.closePath();
+          ctx.fill(); ctx.stroke();
         }
         break;
-      case 'plate':
-        ctx.strokeStyle = hslaCSS(this.hue, 20, this.light + 10, 0.6 * fade);
-        ctx.lineWidth = 1.4;
-        ctx.beginPath(); ctx.ellipse(0, 0, r * 1.18, r * 1.0, 0, 0, TAU); ctx.stroke();
-        ctx.beginPath(); ctx.ellipse(0, 0, r * 1.05, r * 0.85, 0, 0, TAU); ctx.stroke();
-        break;
-      case 'fin':
-        ctx.fillStyle = hslaCSS(this.hue, this.sat - 10, this.light + 5, 0.55 * fade);
-        ctx.beginPath();
-        ctx.moveTo(0, -r * 0.6);
-        ctx.quadraticCurveTo(-r * 0.6, -r * 1.4, -r * 0.9, -r * 0.5);
-        ctx.lineTo(-r * 0.3, -r * 0.7);
-        ctx.closePath();
-        ctx.fill();
-        ctx.beginPath();
-        ctx.moveTo(0, r * 0.6);
-        ctx.quadraticCurveTo(-r * 0.6, r * 1.4, -r * 0.9, r * 0.5);
-        ctx.lineTo(-r * 0.3, r * 0.7);
-        ctx.closePath();
-        ctx.fill();
-        break;
-      case 'mandible':
-        ctx.fillStyle = hslaCSS(30, 20, 80, 0.85 * fade);
-        ctx.beginPath();
-        ctx.moveTo(r * 0.9, -r * 0.35);
-        ctx.quadraticCurveTo(r * 1.7, -r * 0.2, r * 1.4, 0);
-        ctx.quadraticCurveTo(r * 1.7, r * 0.2, r * 0.9, r * 0.35);
-        ctx.closePath();
-        ctx.fill();
-        break;
-      case 'filtermouth':
-        ctx.strokeStyle = hslaCSS(95, 35, 82, 0.8 * fade);
-        ctx.lineWidth = 1;
-        for (let i = 0; i < 6; i++) {
-          const a = -0.42 + i * 0.17;
-          ctx.beginPath();
-          ctx.moveTo(r * 0.55, 0);
-          ctx.lineTo(r * (1.25 + Math.cos(a) * 0.1), r * Math.sin(a) * 0.7);
-          ctx.stroke();
-        }
-        break;
-      case 'frill':
-        ctx.strokeStyle = hslaCSS(this.hue + 25, this.sat, this.light + 16, 0.68 * fade);
-        ctx.lineWidth = 1.1;
-        for (let i = 0; i < 7; i++) {
-          const a = -Math.PI * 0.62 + i * 0.2;
-          ctx.beginPath();
-          ctx.moveTo(Math.cos(a) * r * 0.95, Math.sin(a) * r * 0.8);
-          ctx.quadraticCurveTo(Math.cos(a) * r * 1.42, Math.sin(a) * r * 1.05, Math.cos(a) * r * 1.22, Math.sin(a) * r * 0.85);
-          ctx.stroke();
-        }
-        break;
-      case 'tendril': {
-        ctx.strokeStyle = hslaCSS(this.hue - 8, this.sat - 12, this.light + 8, 0.62 * fade);
-        ctx.lineWidth = 0.95;
+      }
+      case 'plate': {
+        ctx.strokeStyle = hslaCSS(this.hue + 10, this.sat - 15, this.light + 8, 0.55 * fade);
+        ctx.lineWidth = Math.max(0.8, r * 0.05);
+        ctx.beginPath(); ctx.ellipse(0, 0, r * 1.08, r * 0.78, 0, 0, TAU); ctx.stroke();
+        ctx.beginPath(); ctx.ellipse(0, 0, r * 0.82, r * 0.58, 0, 0, TAU); ctx.stroke();
         for (let i = 0; i < 3; i++) {
-          const side = i - 1;
-          const t = Math.sin(performance.now() * 0.006 + this.bornAt * 6 + i) * r * 0.3;
+          const rx = (i - 1) * r * 0.38;
+          ctx.beginPath(); ctx.moveTo(rx, -r * 0.62); ctx.lineTo(rx + r*0.06, r * 0.62); ctx.stroke();
+        }
+        break;
+      }
+      case 'fin': {
+        ctx.fillStyle = hslaCSS(this.hue, this.sat - 12, this.light + 18, 0.48 * fade);
+        ctx.strokeStyle = hslaCSS(this.hue, this.sat - 5, this.light + 8, 0.55 * fade);
+        ctx.lineWidth = Math.max(0.5, r * 0.025);
+        for (const side of [-1, 1]) {
+          const bx = -r * 0.10, by = side * r * 0.82;
+          const tx = -r * 0.55, ty = side * r * 1.62;
+          const ex = r * 0.35, ey = side * r * 0.85;
           ctx.beginPath();
-          ctx.moveTo(-r * 0.85, side * r * 0.22);
-          ctx.bezierCurveTo(-r * 1.25, side * r * 0.38 + t * 0.25, -r * 1.6, side * r * 0.48 - t * 0.2, -r * 1.95, side * r * 0.35 + t);
+          ctx.moveTo(bx, by);
+          ctx.bezierCurveTo(bx - r*0.12, side*r*1.10, tx - r*0.08, side*r*1.45, tx, ty);
+          ctx.bezierCurveTo(tx + r*0.18, side*r*1.35, ex - r*0.05, side*r*1.05, ex, ey);
+          ctx.closePath();
+          ctx.fill(); ctx.stroke();
+          ctx.strokeStyle = hslaCSS(this.hue, this.sat, this.light - 5, 0.30 * fade);
+          ctx.lineWidth = Math.max(0.4, r * 0.018);
+          for (let v = 1; v <= 3; v++) {
+            const vt = v / 4;
+            ctx.beginPath();
+            ctx.moveTo(lerp(bx, tx, vt*0.6), lerp(by, ty, vt*0.6));
+            ctx.lineTo(lerp(bx, ex, vt*0.8), lerp(by, ey, vt*0.8));
+            ctx.stroke();
+          }
+          ctx.strokeStyle = hslaCSS(this.hue, this.sat - 5, this.light + 8, 0.55 * fade);
+          ctx.lineWidth = Math.max(0.5, r * 0.025);
+        }
+        break;
+      }
+      case 'mandible': {
+        ctx.fillStyle = hslaCSS(this.hue - 20, this.sat + 5, this.light - 10, 0.80 * fade);
+        ctx.strokeStyle = hslaCSS(this.hue - 15, this.sat, this.light, 0.45 * fade);
+        ctx.lineWidth = Math.max(0.5, r * 0.028);
+        for (const side of [-1, 1]) {
+          ctx.beginPath();
+          ctx.moveTo(r * 0.72, side * r * 0.22);
+          ctx.bezierCurveTo(r * 1.10, side * r * 0.38, r * 1.38, side * r * 0.55, r * 1.28, side * r * 0.22);
+          ctx.bezierCurveTo(r * 1.38, side * r * 0.05, r * 1.05, side * r * 0.05, r * 0.72, side * r * 0.22);
+          ctx.closePath();
+          ctx.fill(); ctx.stroke();
+        }
+        break;
+      }
+      case 'filtermouth': {
+        ctx.strokeStyle = hslaCSS(this.hue + 15, 60, this.light + 20, 0.55 * fade);
+        ctx.lineWidth = Math.max(0.5, r * 0.030);
+        ctx.lineCap = 'round';
+        for (let i = 0; i < 7; i++) {
+          const a = -Math.PI * 0.42 + i * (Math.PI * 0.84 / 6);
+          const cx2 = r * 0.88 + r * 0.28 * Math.cos(a);
+          const cy2 = r * 0.28 * Math.sin(a) * 0.6;
+          ctx.beginPath();
+          ctx.moveTo(r * 0.80, 0);
+          ctx.quadraticCurveTo(cx2, cy2, r * 0.80 + r * 0.60 * Math.cos(a), r * 0.60 * Math.sin(a));
           ctx.stroke();
         }
+        ctx.fillStyle = hslaCSS(this.hue + 15, 60, this.light + 15, 0.40 * fade);
+        ctx.beginPath(); ctx.arc(r * 0.80, 0, r * 0.07, 0, TAU); ctx.fill();
+        ctx.lineCap = 'butt';
+        break;
+      }
+      case 'frill': {
+        const frillPts = [];
+        for (let i = 0; i < 9; i++) {
+          const a = -Math.PI * 0.75 + i * (Math.PI * 1.5 / 8);
+          const inner = r * 0.90, outer = r * (1.42 + Math.sin(i * 2.2 + performance.now() * 0.003) * 0.06);
+          frillPts.push({ ix: Math.cos(a) * inner, iy: Math.sin(a) * inner,
+                          ox: Math.cos(a) * outer, oy: Math.sin(a) * outer });
+        }
+        ctx.fillStyle = hslaCSS(this.hue + 30, this.sat - 10, this.light + 22, 0.30 * fade);
+        ctx.strokeStyle = hslaCSS(this.hue + 25, this.sat, this.light + 15, 0.55 * fade);
+        ctx.lineWidth = Math.max(0.5, r * 0.022);
+        ctx.beginPath();
+        ctx.moveTo(frillPts[0].ix, frillPts[0].iy);
+        for (const fp of frillPts) ctx.lineTo(fp.ox, fp.oy);
+        ctx.lineTo(frillPts[frillPts.length-1].ix, frillPts[frillPts.length-1].iy);
+        ctx.closePath();
+        ctx.fill();
+        for (const fp of frillPts) {
+          ctx.beginPath(); ctx.moveTo(fp.ix, fp.iy); ctx.lineTo(fp.ox, fp.oy); ctx.stroke();
+        }
+        break;
+      }
+      case 'tendril': {
+        ctx.strokeStyle = hslaCSS(this.hue, this.sat - 15, this.light + 18, 0.50 * fade);
+        ctx.lineWidth = Math.max(0.5, r * 0.028);
+        ctx.lineCap = 'round';
+        for (const side of [-1, 1]) {
+          const w1 = Math.sin(performance.now() * 0.006 + this.bornAt * 6) * r * 0.30;
+          const w2 = Math.sin(performance.now() * 0.0045 + this.bornAt * 4 + 1.8) * r * 0.25;
+          ctx.beginPath();
+          ctx.moveTo(-r * 0.82, side * r * 0.22);
+          ctx.bezierCurveTo(-r * 1.20, side * r * 0.38 + w1 * 0.25,
+                            -r * 1.58, side * r * 0.48 - w1 * 0.20, -r * 1.95, side * r * 0.35 + w2);
+          ctx.stroke();
+        }
+        ctx.lineCap = 'butt';
         break;
       }
     }
@@ -2136,7 +2343,7 @@ class Food extends Entity {
     this.kind = 'food';
     this.foodId = Food._nextId = (Food._nextId || 0) + 1;
     this.type = type;
-    this.r = sizeOverride != null ? sizeOverride : (type === 'meat' ? 4.5 + Math.random() * 2 : 2.5);
+    this.r = sizeOverride != null ? sizeOverride : (type === 'meat' ? 4.5 + Math.random() * 2 : 3.5);
     this.hue = biome ? biome.nutrientH : 60;
     this.sat = biome ? biome.nutrientS : 80;
     this.light = biome ? biome.nutrientL : 70;
@@ -2157,6 +2364,7 @@ class Food extends Entity {
     if (this.snapT > 0) this.snapT = Math.max(0, this.snapT - dt);
     if (this.linkCooldown > 0) this.linkCooldown = Math.max(0, this.linkCooldown - dt);
     if (this.relinkIntent > 0) this.relinkIntent = Math.max(0, this.relinkIntent - dt);
+    if (this._magneticDelay > 0) this._magneticDelay = Math.max(0, this._magneticDelay - dt);
     if (this.links && this.links.size > 0) {
       for (const o of this.links) {
         if (!o || o.dead || o === this) this.links.delete(o);
@@ -2165,8 +2373,8 @@ class Food extends Entity {
     this.t += dt * (0.8 + Math.abs(this.vx + this.vy) * 0.02);
     this.x += this.vx * dt; this.y += this.vy * dt;
     // gentle ambient float drift
-    const swayMul = this.type === 'plant' ? 2.1 : 1.2;
-    const damp = this.type === 'plant' ? 0.16 : 0.55;
+    const swayMul = this.type === 'plant' ? 4.5 : 1.2;
+    const damp = this.type === 'plant' ? 0.06 : 0.55;
     this.vx += Math.sin(this.t * 0.7) * swayMul * dt;
     this.vy += Math.cos(this.t * 0.9) * swayMul * dt;
     this.vx *= (1 - damp * dt); this.vy *= (1 - damp * dt);
@@ -2224,15 +2432,55 @@ class Food extends Entity {
       }
     }
 
-    const pulse = 0.85 + 0.15 * Math.sin(this.t * 4);
-    const glowR = this.r * 3;
+    const pulse = 0.92 + 0.08 * Math.sin(this.t * 4);
+    // Soft halo
+    const glowR = this.r * 2.2;
     const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, glowR);
-    grad.addColorStop(0, hslaCSS(this.hue, this.sat, this.light, 0.6 * pulse));
+    grad.addColorStop(0, hslaCSS(this.hue, this.sat, this.light, 0.35 * pulse));
     grad.addColorStop(1, hslaCSS(this.hue, this.sat, this.light, 0));
     ctx.fillStyle = grad;
     ctx.beginPath(); ctx.arc(sx, sy, glowR, 0, TAU); ctx.fill();
-    ctx.fillStyle = hslaCSS(this.hue, this.sat, Math.min(95, this.light + 15), 0.95);
-    ctx.beginPath(); ctx.arc(sx, sy, this.r * pulse, 0, TAU); ctx.fill();
+    // Plant food: draw as a small rounded leaf rather than a plain circle.
+    const r = this.r * pulse;
+    if (this.type === 'plant') {
+      // Leaf shape: two quadratic arcs forming a pointed oval, rotated by t.
+      const leafLen = r * 2.2;
+      const leafW  = r * 1.1;
+      const ang = this.t * 0.55; // slowly rotates
+      ctx.save();
+      ctx.translate(sx, sy);
+      ctx.rotate(ang);
+      // ink outline
+      ctx.strokeStyle = '#1a1024';
+      ctx.lineWidth = Math.max(1.2, r * 0.32);
+      ctx.fillStyle = hslaCSS(this.hue, this.sat, Math.min(96, this.light + 12), 1);
+      ctx.beginPath();
+      ctx.moveTo(0, -leafLen * 0.5);
+      ctx.quadraticCurveTo(leafW, 0, 0, leafLen * 0.5);
+      ctx.quadraticCurveTo(-leafW, 0, 0, -leafLen * 0.5);
+      ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      // midrib line
+      ctx.strokeStyle = hslaCSS(this.hue + 20, 55, 85, 0.55);
+      ctx.lineWidth = Math.max(0.5, r * 0.14);
+      ctx.beginPath();
+      ctx.moveTo(0, -leafLen * 0.44); ctx.lineTo(0, leafLen * 0.44);
+      ctx.stroke();
+      // highlight
+      ctx.fillStyle = 'rgba(255,255,255,0.65)';
+      ctx.beginPath();
+      ctx.ellipse(-r * 0.22, -leafLen * 0.22, Math.max(0.5, r * 0.18), Math.max(0.5, r * 0.28), -0.4, 0, TAU);
+      ctx.fill();
+      ctx.restore();
+    } else {
+      // Meat / nutrient: original storybook chunk circle.
+      ctx.strokeStyle = '#1a1024';
+      ctx.lineWidth = Math.max(1.4, r * 0.34);
+      ctx.fillStyle = hslaCSS(this.hue, this.sat, Math.min(96, this.light + 18), 1);
+      ctx.beginPath(); ctx.arc(sx, sy, r, 0, TAU); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.beginPath(); ctx.arc(sx - r * 0.35, sy - r * 0.35, Math.max(0.6, r * 0.25), 0, TAU); ctx.fill();
+    }
 
     if (this.type === 'plant' && this.snapT > 0) {
       const k = clamp(this.snapT / 0.35, 0, 1);
@@ -2316,282 +2564,851 @@ class PartShard extends Entity {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PLANT CLUSTERS — branching organic food structures for herbivores
+// PLANT STRUCTURES — procedural drifting plants built from clustered chunks
 // ─────────────────────────────────────────────────────────────────────────────
-class PlantCluster {
+// A PlantStructure is composed of one or more PlantNodes (central organic
+// blobs formed from 5 clustered plant chunks). Each node sprouts branches of
+// segments and leaves. Branch tips gently attract loose plant/food chunks,
+// nodes grow internal chunks that eject when ripe, branches can sprout
+// secondary branches when struck by chunks, and tips can connect plant↔plant
+// once per structure. Plants may anchor to a single rock.
+//
+// Public shape kept compatible with the old PlantCluster: `x, y, dead, hue,
+// scale, nodes[], links[]`, plus `update(dt, entities, game, drift)`,
+// `eatFrom(...)`, `draw(...)`. Each entry in `nodes[]` exposes `{x, y, vx, vy,
+// r, baseR, hp, maxHP, parent}` so renderer/AI/save code stays compatible.
+
+const PLANT_TUNE = {
+  CLUSTER_REQUIRED_CHUNKS: 7,
+  CLUSTER_RADIUS: 22,
+  CLUSTER_REQUIRED_TIME: 2.5,
+  STARTING_BRANCH_COUNT: 3,
+  STARTING_LEAVES_PER_BRANCH: 1,
+  MAX_MAIN_BRANCH_LEAVES: 5,
+  MAX_SECONDARY_BRANCH_LEAVES: 3,
+  SEGMENT_LENGTH: 16,
+  LEAF_BASE_R: 10,
+  NODE_BASE_R: 9,
+  BASE_GROWTH_RATE: 0.08,
+  INTERNAL_CHUNK_EJECTION_FORCE: 42,
+  BRANCH_ATTRACTION_RADIUS: 64,
+  BRANCH_ATTRACTION_STRENGTH: 38,
+  BRANCH_MAX_ATTRACTION_FORCE: 100,
+  BRANCH_TIP_CONNECTION_RADIUS: 16,
+  TIP_TO_TIP_ATTRACTION_RADIUS: 80,
+  TIP_TO_TIP_ATTRACTION_STRENGTH: 26,
+  TIP_CONNECT_RADIUS: 14,
+  SECONDARY_SPAWN_LEAF_MIN: 2,
+  SECONDARY_SPAWN_LEAF_MAX: 4,
+  CREATURE_BRANCH_SLOWDOWN: 0.92,
+  CREATURE_LEAF_SLOWDOWN: 0.95,
+  CHUNK_EJECT_CYCLE_SECONDS: 20,
+  CHUNK_MAGNETIC_DELAY: 3.0,
+  BRANCH_GRAB_CHANCE: 0.35,
+  BRANCH_GRAB_COOLDOWN: 8,
+  LEAF_PUSH_FORCE: 240,
+  ROCK_STICK_DAMP: 0.82,
+  PLANT_SPAWN_RADIUS_MULTIPLIER: 2.5,
+  MIN_PLANT_DISTANCE_FROM_PLAYER_MULTIPLIER: 0.35,
+  MIN_DISTANCE_BETWEEN_PLANTS: 120,
+  LEAF_GROWTH_INTERVAL: 5.5,     // seconds between natural leaf additions per branch
+  SECONDARY_BRANCH_COOLDOWN: 18, // min seconds between sub-branch spawns per main branch
+  MAX_SECONDARY_PER_MAIN: 2,     // max sub-branches allowed per main branch
+  MAX_BRANCHES_PER_STRUCTURE: 7, // total branch cap (mains + subs) per PlantStructure
+};
+
+class PlantStructure {
   constructor(x, y, rng, scale = 1) {
     this.x = x; this.y = y;
     this.dead = false;
-    this.life = 120 + rng() * 100;
-    this.hue = 80 + rng() * 50;
     this.scale = clamp(scale || 1, 1, 10);
-    this.flowPhase = rng() * TAU;
-    this.flowBias = rng() * TAU;
-    this.flowDrift = 0.7 + rng() * 1.1;
-    this.totalHP = 0;
+    const R = rng || Math.random;
+    this.rng = R;
+    this.hue = 108 + R() * 28;
+    this.life = 240 + R() * 280;
+    this.flowPhase = R() * TAU;
+    this.flowBias = R() * TAU;
+    this.flowDrift = 0.7 + R() * 1.1;
+    this.spin = 0;
+    this.plantNodes = [];
+    this.branches = [];
     this.nodes = [];
-    this._build(rng);
-  }
+    this.links = [];
+    this.tipLinks = [];
+    this.connectedToPlant = false;
+    this.connectedToRock = false;
+    this.rootRock = null;
+    this.growthFx = [];
+    this.totalHP = 0;
 
-  _build(rng) {
-    const scaleMul = this.scale;
-    const root = { x: this.x, y: this.y, vx: 0, vy: 0, parent: null, r: 5 * Math.pow(scaleMul, 0.78), hp: 18 * Math.pow(scaleMul, 0.7), maxHP: 18 * Math.pow(scaleMul, 0.7), angle: 0, length: 0 };
-    this.nodes.push(root);
-    const branches = 2 + Math.floor(rng() * 3);
-    for (let b = 0; b < branches; b++) {
-      const baseAngle = (b / branches) * TAU + rng() * 0.8 - 0.4;
-      let parentNode = root;
-      const segs = 3 + Math.floor(rng() * 4);
-      for (let s = 0; s < segs; s++) {
-        const segLen = (18 + rng() * 14) * Math.pow(this.scale, 0.72);
-        const a = baseAngle + (rng() - 0.5) * 0.7;
-        const nr = Math.max(1.8 * Math.pow(this.scale, 0.6), (4.5 - s * 0.55) * Math.pow(this.scale, 0.64));
-        const nodeHP = Math.max(4 * Math.pow(this.scale, 0.55), (15 - s * 2) * Math.pow(this.scale, 0.72));
-        const newNode = {
-          x: parentNode.x + Math.cos(a) * segLen,
-          y: parentNode.y + Math.sin(a) * segLen,
-          vx: 0, vy: 0, parent: parentNode,
-          r: nr, hp: nodeHP, maxHP: nodeHP,
-          angle: a, length: segLen, baseAngle: a
-        };
-        this.nodes.push(newNode);
-        parentNode = newNode;
-        // small sub-branch chance
-        if (s > 0 && rng() < 0.35) {
-          const sa = a + (rng() < 0.5 ? 0.6 : -0.6) + (rng() - 0.5) * 0.4;
-          const sLen = (10 + rng() * 10) * Math.pow(this.scale, 0.68);
-          this.nodes.push({
-            x: parentNode.x + Math.cos(sa) * sLen,
-            y: parentNode.y + Math.sin(sa) * sLen,
-            vx: 0, vy: 0, parent: parentNode,
-            r: Math.max(1.4 * Math.pow(this.scale, 0.55), nr - 1), hp: 5 * Math.pow(this.scale, 0.55), maxHP: 5 * Math.pow(this.scale, 0.55),
-            angle: sa, length: sLen, baseAngle: sa
-          });
-        }
-      }
+    const node = this._spawnNode(x, y, R);
+    for (let b = 0; b < PLANT_TUNE.STARTING_BRANCH_COUNT; b++) {
+      const ang = (b / PLANT_TUNE.STARTING_BRANCH_COUNT) * TAU + (R() - 0.5) * 0.4;
+      this._spawnBranch(node, ang, true, R);
     }
-    this.totalHP = this.nodes.reduce((s, n) => s + n.maxHP, 0);
+    this._refreshFlatNodes();
   }
 
+  // ── Construction helpers ─────────────────────────────────────────────────
+  _spawnNode(x, y, rng) {
+    const baseR = PLANT_TUNE.NODE_BASE_R * Math.pow(this.scale, 0.55);
+    const node = {
+      kind: 'node',
+      x, y, vx: 0, vy: 0,
+      r: baseR, baseR,
+      hp: 20 * Math.pow(this.scale, 0.6),
+      maxHP: 20 * Math.pow(this.scale, 0.6),
+      parent: null, angle: 0, length: 0,
+      structure: this,
+      branches: [],
+      internalSlots: [],
+      petalAngles: [],
+    };
+    for (let i = 0; i < 5; i++) {
+      node.petalAngles.push((i / 5) * TAU + (rng() - 0.5) * 0.45);
+    }
+    this.plantNodes.push(node);
+    this.totalHP += node.maxHP;
+    return node;
+  }
+
+  _spawnBranch(node, originAngle, isMain, rng, originPos = null, parentBranch = null) {
+    const branch = {
+      kind: 'branch',
+      node, parentBranch, isMain,
+      maxLeaves: isMain ? PLANT_TUNE.MAX_MAIN_BRANCH_LEAVES : PLANT_TUNE.MAX_SECONDARY_BRANCH_LEAVES,
+      originAngle,
+      origin: originPos ? { x: originPos.x, y: originPos.y } : { x: node.x, y: node.y },
+      segments: [], leaves: [],
+      waveSpeed: 0.55 + rng() * 1.05,
+      waveAmplitude: 0.08 + rng() * 0.16,
+      phase: rng() * TAU,
+      stiffness: 0.7 + rng() * 0.18,
+      connected: false, done: false,
+      parentSegRef: null,
+    };
+    node.branches.push(branch);
+    this.branches.push(branch);
+    node.internalSlots.push({ branch, progress: 0, angle: originAngle });
+    this._growBranch(branch, rng);
+    return branch;
+  }
+
+  _growBranch(branch, rng) {
+    if (branch.done) return false;
+    if (branch.leaves.length >= branch.maxLeaves) { branch.done = true; return false; }
+    const last = branch.segments.length === 0
+      ? branch.origin
+      : branch.segments[branch.segments.length - 1];
+    const segLen = PLANT_TUNE.SEGMENT_LENGTH * Math.pow(this.scale, 0.5);
+    const wob = rng ? (rng() - 0.5) * 0.22 : 0;
+    const ang = branch.originAngle + branch.segments.length * 0.07 + wob;
+    const sx = last.x + Math.cos(ang) * segLen;
+    const sy = last.y + Math.sin(ang) * segLen;
+    const seg = { kind: 'segment', x: sx, y: sy, vx: 0, vy: 0, restLen: segLen, angle: ang };
+    branch.segments.push(seg);
+    const leafR = PLANT_TUNE.LEAF_BASE_R * Math.pow(this.scale, 0.5);
+    // Leaves are kinematic obstacles anchored at the branch segment, not edible.
+    const leafSide = (branch.segments.length - 1) % 2 === 0 ? 1 : -1;
+    const leaf = {
+      kind: 'leaf',
+      branch,
+      parent: seg,
+      leafSide,
+      r: leafR, baseR: leafR,
+      // Kinematic position fields — set every frame from segment in _updateBranch
+      baseX: sx, baseY: sy,
+      tipX: sx, tipY: sy,
+      perpAng: 0,
+      x: sx, y: sy, // midpoint, updated each frame
+      _swayKick: 0,
+      hp: 12 * Math.pow(this.scale, 0.55),
+      maxHP: 12 * Math.pow(this.scale, 0.55),
+      structure: this,
+    };
+    branch.leaves.push(leaf);
+    if (branch.leaves.length >= branch.maxLeaves) branch.done = true;
+    this._refreshFlatNodes();
+    return true;
+  }
+
+  _refreshFlatNodes() {
+    const flat = [];
+    for (const n of this.plantNodes) flat.push(n);
+    for (const b of this.branches) for (const lf of b.leaves) flat.push(lf);
+    this.nodes = flat;
+  }
+
+  _branchTip(branch) {
+    if (branch.leaves.length > 0) return branch.leaves[branch.leaves.length - 1];
+    if (branch.segments.length > 0) return branch.segments[branch.segments.length - 1];
+    return null;
+  }
+
+  _emitGrowthFx(x, y, strength = 1, kind = 'eat') {
+    if (this.growthFx.length >= 24) return;
+    this.growthFx.push({ x, y, t: 0.9, life: 0.9, r: (5 + strength * 7) * Math.pow(this.scale || 1, 0.33), kind });
+  }
+
+  // ── Update loop ──────────────────────────────────────────────────────────
   update(dt, entities, game, drift = { x: 0, y: 0 }) {
     if (this.dead) return;
     this.life -= dt;
-    if (this.life <= 0) { this.dead = true; return; }
+    if (this.life <= 0 && this.plantNodes.length <= 1 && this.branches.every(b => b.leaves.length <= 1)) {
+      this.dead = true; return;
+    }
 
     const T_now = performance.now() * 0.001;
-    // global current drift applied uniformly to all plants.
-    this.x += drift.x * dt * 0.42;
-    this.y += drift.y * dt * 0.42;
+    const driftMul = this.connectedToRock ? 0.65 : 0.42;
+    this.x += drift.x * dt * driftMul;
+    this.y += drift.y * dt * driftMul;
 
-    // gentle sway + very slow natural rotation
-    for (let i = 1; i < this.nodes.length; i++) {
-      const n = this.nodes[i];
-      const sway = Math.sin(T_now * 0.6 + i * 0.9) * 0.012;
-      const rx = n.x - this.x, ry = n.y - this.y;
-      const spin = this.spin || 0;
-      const rot = 0.018 + spin * 0.07;
-      n.vx += sway + (-ry) * rot * dt + drift.x * dt * 0.56;
-      n.vy += sway * 0.5 + (rx) * rot * dt + drift.y * dt * 0.56;
+    if (this.connectedToRock && this.rootRock && this.rootRock.rock && !this.rootRock.rock._removed) {
+      const rock = this.rootRock.rock;
+      const tx = rock.x + this.rootRock.offsetX;
+      const ty = rock.y + this.rootRock.offsetY;
+      // Elastic tether: spring toward anchor point but still allows drift
+      const tdx = tx - this.x, tdy = ty - this.y;
+      const tDist = Math.hypot(tdx, tdy) || 0.001;
+      const slack = rock.maxR * 0.8; // free range before spring activates
+      if (tDist > slack) {
+        const pull = Math.min(1, (tDist - slack) / (rock.maxR * 2));
+        this.x += (tdx / tDist) * pull * tDist * dt * 3.5;
+        this.y += (tdy / tDist) * pull * tDist * dt * 3.5;
+      }
     }
 
-    if (this.spin) this.spin *= Math.max(0, 1 - dt * 0.35);
-
-    // spring pull back to parent
-    for (let i = 1; i < this.nodes.length; i++) {
-      const n = this.nodes[i];
-      const p = n.parent;
-      if (!p) continue;
-      const dx = n.x - p.x, dy = n.y - p.y;
-      const d = Math.hypot(dx, dy) || 1;
-      const force = (d - n.length) * 0.22;
-      n.vx -= (dx / d) * force;
-      n.vy -= (dy / d) * force;
-    }
-
-    for (let i = 0; i < this.nodes.length; i++) {
-      const n = this.nodes[i];
-      n.x += n.vx * dt; n.y += n.vy * dt;
+    // Sway central nodes; root pinned to structure center.
+    for (let i = 0; i < this.plantNodes.length; i++) {
+      const n = this.plantNodes[i];
+      const sway = Math.sin(T_now * 0.6 + n.x * 0.013) * 0.012;
+      n.vx += sway + drift.x * dt * 0.42;
+      n.vy += sway * 0.6 + drift.y * dt * 0.42;
       n.vx *= 0.86; n.vy *= 0.86;
+      n.x += n.vx * dt; n.y += n.vy * dt;
       if (i === 0) { n.x = this.x; n.y = this.y; n.vx = 0; n.vy = 0; }
+      // gentle regen
+      if (n.hp < n.maxHP) n.hp = Math.min(n.maxHP, n.hp + dt * 0.6);
+      if (n.baseR && n.r < n.baseR) n.r = Math.min(n.baseR, n.r + dt * 0.45);
     }
 
-    // entity collisions — bump and maybe break
-    for (let ei = 0; ei < entities.length; ei++) {
-      const e = entities[ei];
-      if (e.dead || e.r < 2) continue;
-      for (let i = 1; i < this.nodes.length; i++) {
-        const n = this.nodes[i];
-        const dx = e.x - n.x, dy = e.y - n.y;
-        const d = Math.hypot(dx, dy);
-        const overlap = e.r * 0.7 + n.r - d;
-        if (overlap > 0) {
-          const spd = Math.hypot(e.vx, e.vy);
-          n.vx -= (e.vx * 0.2) * dt * 12;
-          n.vy -= (e.vy * 0.2) * dt * 12;
+    for (const branch of this.branches) this._updateBranch(branch, dt, T_now, drift);
 
-          if (spd > 42) {
-            const push = Math.min(1.8, overlap * 0.08) * clamp((spd - 30) / 120, 0, 1.2);
-            const dirx = d > 0.001 ? (dx / d) : 0;
-            const diry = d > 0.001 ? (dy / d) : 0;
-            this.x -= dirx * push;
-            this.y -= diry * push;
-            const relx = n.x - this.x;
-            const rely = n.y - this.y;
-            const cross = relx * e.vy - rely * e.vx;
-            this.spin = (this.spin || 0) + clamp(cross / 90000, -0.35, 0.35);
+    this._updateInternalGrowth(dt, game);
+    this._updateLeafGrowth(dt);
+    this._updateTipInteractions(dt, game);
+    if (entities && entities.length) this._updateCreatureInteractions(dt, entities);
+
+    // Leaf regen.
+    for (const branch of this.branches) {
+      for (const lf of branch.leaves) {
+        if (lf.hp < lf.maxHP) lf.hp = Math.min(lf.maxHP, lf.hp + dt * 0.6);
+        if (lf.r < lf.baseR) lf.r = Math.min(lf.baseR, lf.r + dt * 0.45);
+      }
+    }
+
+    // Tick FX.
+    for (let i = this.growthFx.length - 1; i >= 0; i--) {
+      const fx = this.growthFx[i];
+      fx.t -= dt;
+      if (fx.t <= 0) this.growthFx.splice(i, 1);
+    }
+
+    // Prune dead leaves; if a branch lost all leaves, drop it (it can regrow next merge).
+    let pruned = false;
+    for (const branch of this.branches) {
+      const before = branch.leaves.length;
+      branch.leaves = branch.leaves.filter(lf => !lf.dead);
+      if (branch.leaves.length !== before) pruned = true;
+    }
+    if (pruned) this._refreshFlatNodes();
+
+    if (this.plantNodes.length === 0) this.dead = true;
+  }
+
+  _updateBranch(branch, dt, T_now, drift) {
+    const wave = Math.sin(T_now * branch.waveSpeed + branch.phase) * branch.waveAmplitude;
+    // Recompute origin from (possibly moved) parent.
+    if (!branch.parentBranch) {
+      branch.origin.x = branch.node.x;
+      branch.origin.y = branch.node.y;
+    } else if (branch.parentSegRef && branch.parentSegRef.seg) {
+      branch.origin.x = branch.parentSegRef.seg.x;
+      branch.origin.y = branch.parentSegRef.seg.y;
+    }
+    let prevX = branch.origin.x;
+    let prevY = branch.origin.y;
+    const dmul = this.connectedToRock ? 0.25 : 0.55;
+    for (let i = 0; i < branch.segments.length; i++) {
+      const seg = branch.segments[i];
+      const a = branch.originAngle + wave * (1 + i * 0.25) + i * 0.04;
+      const targetX = prevX + Math.cos(a) * seg.restLen;
+      const targetY = prevY + Math.sin(a) * seg.restLen;
+      seg.vx += (targetX - seg.x) * branch.stiffness * dt * 12;
+      seg.vy += (targetY - seg.y) * branch.stiffness * dt * 12;
+      seg.vx += drift.x * dt * dmul;
+      seg.vy += drift.y * dt * dmul;
+      seg.vx *= 0.8; seg.vy *= 0.8;
+      seg.x += seg.vx * dt; seg.y += seg.vy * dt;
+      const dx = seg.x - prevX, dy = seg.y - prevY;
+      const d = Math.hypot(dx, dy) || 0.0001;
+      if (d > seg.restLen * 1.4) {
+        const k = seg.restLen * 1.4 / d;
+        seg.x = prevX + dx * k;
+        seg.y = prevY + dy * k;
+      }
+      prevX = seg.x; prevY = seg.y;
+    }
+    // Leaves: kinematic — root pinned to segment, tip sways perpendicular to branch.
+    for (let i = 0; i < branch.leaves.length; i++) {
+      const lf = branch.leaves[i];
+      const seg = branch.segments[Math.min(i, branch.segments.length - 1)];
+      if (!seg) continue;
+      const side = lf.leafSide !== undefined ? lf.leafSide : (i % 2 === 0 ? 1 : -1);
+      // Smoothly ease the kick toward its target for a lazy, organic response.
+      if (lf._swayKick) lf._swayKick *= Math.max(0, 1 - dt * 1.2);
+      if (Math.abs(lf._swayKick || 0) < 0.001) lf._swayKick = 0;
+      const sway = Math.sin(T_now * branch.waveSpeed + branch.phase + i * 0.7) * branch.waveAmplitude * 1.8
+                 + (lf._swayKick || 0);
+      const perpAng = branch.originAngle + side * HALF_PI + sway;
+      const leafLen = lf.r * 3.0;
+      lf.baseX = seg.x; lf.baseY = seg.y;
+      lf.perpAng = perpAng;
+      lf.tipX = seg.x + Math.cos(perpAng) * leafLen;
+      lf.tipY = seg.y + Math.sin(perpAng) * leafLen;
+      lf.x = seg.x + Math.cos(perpAng) * leafLen * 0.5; // midpoint for grid/collision
+      lf.y = seg.y + Math.sin(perpAng) * leafLen * 0.5;
+    }
+  }
+
+  _updateInternalGrowth(dt, game) {
+    for (const node of this.plantNodes) {
+      if (!node.internalSlots.length) continue;
+      const branchCount = node.internalSlots.length;
+      // Evenly distribute ejections: one full cycle = CHUNK_EJECT_CYCLE_SECONDS, split by branch count.
+      // e.g. 3 branches → eject every 3.33 s, cycling branch 0 → 1 → 2 → 0 ...
+      const period = PLANT_TUNE.CHUNK_EJECT_CYCLE_SECONDS / branchCount;
+      if (node._ejectTimer === undefined) {
+        node._ejectTimer = period * (this.rng ? this.rng() : Math.random()); // stagger start
+        node._ejectBranchIdx = 0;
+      }
+      node._ejectTimer -= dt;
+      if (node._ejectTimer <= 0) {
+        node._ejectTimer += period; // stay in rhythm (don't reset to 0 to avoid drift)
+        const slotIdx = node._ejectBranchIdx % branchCount;
+        node._ejectBranchIdx = (node._ejectBranchIdx + 1) % branchCount;
+        this._ejectInternalChunk(node, node.internalSlots[slotIdx], game);
+      }
+    }
+  }
+
+  // Branch ends only grow when they catch a drifting plant chunk via _tryGrabChunk.
+  // This method now only handles the new-main-branch sprouting when a branch is done.
+  _updateLeafGrowth(dt) {
+    for (const branch of this.branches) {
+      if (!branch.done) continue;
+      // When a main branch fills to max, sprout a new main branch from its node
+      // if we haven't hit the structure-wide branch cap.
+      if (branch.isMain && !branch._spawnedNew &&
+          this.branches.length < PLANT_TUNE.MAX_BRANCHES_PER_STRUCTURE) {
+        branch._spawnedNew = true;
+        const node = branch.node;
+        const usedAngles = node.branches.map(b => b.originAngle);
+        let bestAngle = branch.originAngle + Math.PI + (this.rng() - 0.5) * 0.7;
+        let bestGap = -1;
+        for (let t = 0; t < 8; t++) {
+          const cand = this.rng() * TAU;
+          let minGap = Infinity;
+          for (const ua of usedAngles) {
+            let diff = Math.abs(cand - ua) % TAU;
+            if (diff > Math.PI) diff = TAU - diff;
+            if (diff < minGap) minGap = diff;
           }
+          if (minGap > bestGap) { bestGap = minGap; bestAngle = cand; }
+        }
+        this._spawnBranch(node, bestAngle, true, this.rng);
+        this._emitGrowthFx(node.x, node.y, 1.1, 'sprout');
+      }
+    }
+  }
 
-          // high-speed collision damages/breaks node
-          if (spd > 74) {
-            n.hp -= Math.max(0, spd - 58) * dt * 0.22;
-            if (n.hp <= 0) {
-              // collect this node + descendants, break off as a floating mini-cluster
-              this._breakOff(n, e.vx, e.vy, game);
-              n.dead = true;
-            }
+  _ejectInternalChunk(node, slot, game) {
+    if (!game || typeof game.spawnFood !== 'function') return;
+    // Eject outward along this slot's branch direction with a random spread.
+    // Using slot.angle avoids the degenerate case where node === plant center (atan2 returns 0).
+    const a = (slot ? slot.angle : Math.random() * TAU) + (Math.random() - 0.5) * 1.1;
+    const dist = node.r + 4;
+    const x = node.x + Math.cos(a) * dist;
+    const y = node.y + Math.sin(a) * dist;
+    const biome = (typeof biomeAt === 'function') ? biomeAt(Math.hypot(x, y)) : null;
+    const f = game.spawnFood(x, y, 'plant', biome, 3 + Math.random() * 1.5);
+    if (f) {
+      const force = PLANT_TUNE.INTERNAL_CHUNK_EJECTION_FORCE;
+      f.vx = Math.cos(a) * force + (Math.random() - 0.5) * 6;
+      f.vy = Math.sin(a) * force + (Math.random() - 0.5) * 6;
+      f.linkOrigin = 'plant';
+      f.relinkIntent = 0;
+      f._sourcePlant = this;
+      f._sourceCooldown = 1.4;
+      f._magneticDelay = PLANT_TUNE.CHUNK_MAGNETIC_DELAY; // delay before branch tips can attract this chunk
+    }
+    this._emitGrowthFx(node.x, node.y, 0.9, 'eject');
+  }
+
+  _updateTipInteractions(dt, game) {
+    if (!game) return;
+    const grid = game.grid;
+    const plants = game.plants;
+    const scratch = game._scratch || [];
+
+    for (const branch of this.branches) {
+      const tip = this._branchTip(branch);
+      if (!tip) continue;
+      const radius = PLANT_TUNE.BRANCH_ATTRACTION_RADIUS;
+      const r2 = radius * radius;
+      const near = grid ? grid.query(tip.x, tip.y, radius, scratch) : game.foods;
+      for (let i = 0; i < near.length; i++) {
+        const o = near[i];
+        if (!o || o.kind !== 'food' || o.dead) continue;
+        if (o.type !== 'plant' && o.type !== 'meat') continue;
+        // Skip chunks still in post-ejection magnetic delay — they drift freely first.
+        if ((o._magneticDelay || 0) > 0) continue;
+        if (o._sourcePlant === this && (o._sourceCooldown || 0) > 0) {
+          o._sourceCooldown -= dt;
+          if (o._sourceCooldown <= 0) o._sourcePlant = null;
+          else continue;
+        }
+        const dx = tip.x - o.x;
+        const dy = tip.y - o.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > r2) continue;
+        const d = Math.sqrt(d2) || 0.001;
+        const falloff = 1 - d / radius;
+        let ax = (dx / d) * PLANT_TUNE.BRANCH_ATTRACTION_STRENGTH * falloff;
+        let ay = (dy / d) * PLANT_TUNE.BRANCH_ATTRACTION_STRENGTH * falloff;
+        const mag = Math.hypot(ax, ay);
+        const cap = PLANT_TUNE.BRANCH_MAX_ATTRACTION_FORCE;
+        if (mag > cap) { const s = cap / mag; ax *= s; ay *= s; }
+        o.vx += ax * dt;
+        o.vy += ay * dt;
+        // Probabilistic grab at tip — not guaranteed, branch has a cooldown.
+        if (!branch.done && d <= PLANT_TUNE.BRANCH_TIP_CONNECTION_RADIUS) {
+          const now = performance.now() * 0.001;
+          if ((branch._lastGrabT === undefined || now - branch._lastGrabT > PLANT_TUNE.BRANCH_GRAB_COOLDOWN)
+              && Math.random() < PLANT_TUNE.BRANCH_GRAB_CHANCE) {
+            if (this._tryGrabChunk(branch, o)) branch._lastGrabT = now;
           }
         }
       }
-    }
-    // cascade: orphaned nodes (whose parent died) also die
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const n of this.nodes) {
-        if (!n.dead && n.parent && n.parent.dead) { n.dead = true; changed = true; }
+      if (branch.isMain && branch.segments.length >= PLANT_TUNE.SECONDARY_SPAWN_LEAF_MIN) {
+        this._checkSecondarySpawn(branch, game);
       }
     }
-    this.nodes = this.nodes.filter(n => !n.dead);
-    if (this.nodes.length < 2) this.dead = true;
+
+    if (!this.connectedToPlant && plants && plants.length > 1) {
+      this._updateTipToTipMerge(dt, plants);
+    }
+
+    if (!this.connectedToRock && game.rocks && game.rocks.length) {
+      this._checkRockAttachment(game.rocks);
+    }
   }
 
-  // Collect all descendants of a node (including itself)
-  _descendants(node) {
-    const result = [node];
-    for (const n of this.nodes) {
-      if (!n.dead && n.parent === node) result.push(...this._descendants(n));
-    }
-    return result;
+  _tryGrabChunk(branch, chunk) {
+    if (branch.done || branch.leaves.length >= branch.maxLeaves) { branch.done = true; return false; }
+    chunk.dead = true;
+    this._growBranch(branch, Math.random);
+    this._emitGrowthFx(chunk.x, chunk.y, 1.0, 'grab');
+    return true;
   }
 
-  // Break a branch off as an independent floating mini-cluster
-  _breakOff(node, impactVx, impactVy, game) {
-    if (!node.parent) return; // don't break root
-    const parentNode = node.parent;
-    const descendants = this._descendants(node);
-    if (descendants.length < 2) return;
+  _checkSecondarySpawn(branch, game) {
+    // Only main branches can sprout sub-branches; sub-branches cannot.
+    if (!branch.isMain) return;
+    // Cap at MAX_SECONDARY_PER_MAIN sub-branches per main branch.
+    const existingSubs = this.branches.filter(b => b.parentBranch === branch).length;
+    if (existingSubs >= PLANT_TUNE.MAX_SECONDARY_PER_MAIN) return;
+    // Cooldown: prevent rapid secondary branching.
+    const now = performance.now() * 0.001;
+    if (branch._lastSecondaryT !== undefined && (now - branch._lastSecondaryT) < PLANT_TUNE.SECONDARY_BRANCH_COOLDOWN) return;
 
-    const moved = new Set(descendants);
-    this.nodes = this.nodes.filter(n => !moved.has(n));
-
-    // Create a mini PlantCluster rooted at node's current position
-    const mini = Object.create(PlantCluster.prototype);
-    mini.x = node.x; mini.y = node.y;
-    mini.dead = false;
-    mini.life = 65 + Math.random() * 60;
-    mini.hue = this.hue;
-    mini.scale = this.scale || 1;
-    mini.flowPhase = Math.random() * TAU;
-    mini.flowBias = Math.random() * TAU;
-    mini.flowDrift = 0.9 + Math.random() * 1.2;
-    mini.spin = (Math.random() - 0.5) * 1.2;
-    mini.totalHP = 0;
-    // Re-root: detach from parent, drift outward
-    node.parent = null;
-    mini.nodes = descendants;
-    mini.totalHP = descendants.reduce((s, n) => s + n.maxHP, 0);
-    // Drift both halves apart from the break point.
-    let sepX = node.x - parentNode.x;
-    let sepY = node.y - parentNode.y;
-    const sepL = Math.hypot(sepX, sepY) || 1;
-    sepX /= sepL;
-    sepY /= sepL;
-
-    const splitPush = 58 + Math.random() * 38;
-    for (const n of mini.nodes) {
-      n.vx += sepX * splitPush;
-      n.vy += sepY * splitPush;
+    const minIdx = PLANT_TUNE.SECONDARY_SPAWN_LEAF_MIN;
+    const maxIdx = Math.min(PLANT_TUNE.SECONDARY_SPAWN_LEAF_MAX, branch.segments.length - 1);
+    if (maxIdx < minIdx) return;
+    const grid = game.grid;
+    const scratch = game._scratch || [];
+    for (let i = minIdx; i <= maxIdx; i++) {
+      const seg = branch.segments[i];
+      if (!seg) continue;
+      const near = grid ? grid.query(seg.x, seg.y, 16, scratch) : game.foods;
+      for (let j = 0; j < near.length; j++) {
+        const o = near[j];
+        if (!o || o.kind !== 'food' || o.dead || o.type !== 'plant') continue;
+        if (o._sourcePlant === this && (o._sourceCooldown || 0) > 0) continue;
+        const dx = o.x - seg.x, dy = o.y - seg.y;
+        if (dx * dx + dy * dy > 12 * 12) continue;
+        const side = Math.random() < 0.5 ? -1 : 1;
+        const baseA = branch.originAngle + side * (Math.PI * 0.35 + Math.random() * 0.35);
+        const sec = this._spawnBranch(branch.node, baseA, false, Math.random, { x: seg.x, y: seg.y }, branch);
+        sec.parentSegRef = { branch, seg };
+        o.dead = true;
+        branch._lastSecondaryT = now;
+        this._emitGrowthFx(seg.x, seg.y, 1.0, 'sprout');
+        return;
+      }
     }
-    const remainPush = splitPush * 0.7;
-    for (const n of this.nodes) {
-      n.vx -= sepX * remainPush;
-      n.vy -= sepY * remainPush;
-    }
-
-    // Give all nodes an outward velocity from impact
-    const outSpd = 65 + Math.random() * 55;
-    const outA = Math.atan2(impactVy, impactVx) + Math.PI + (Math.random() - 0.5) * 0.8;
-    for (const n of mini.nodes) {
-      n.vx += Math.cos(outA) * outSpd;
-      n.vy += Math.sin(outA) * outSpd;
-    }
-    if (game.plants.length < T.PLANT_CAP * 2) game.plants.push(mini);
-    if (this.nodes.length < 2) this.dead = true;
   }
 
-  // Returns energy gained when a herbivore eats from nearest node
+  _updateTipToTipMerge(dt, plants) {
+    for (const other of plants) {
+      if (other === this || other.dead || other.connectedToPlant) continue;
+      const dx = other.x - this.x, dy = other.y - this.y;
+      if (dx * dx + dy * dy > 360 * 360) continue;
+      let bestA = null, bestB = null, bestD2 = PLANT_TUNE.TIP_TO_TIP_ATTRACTION_RADIUS * PLANT_TUNE.TIP_TO_TIP_ATTRACTION_RADIUS;
+      for (const ba of this.branches) {
+        const ta = this._branchTip(ba);
+        if (!ta) continue;
+        for (const bb of other.branches) {
+          const tb = other._branchTip(bb);
+          if (!tb) continue;
+          const tdx = tb.x - ta.x, tdy = tb.y - ta.y;
+          const td2 = tdx * tdx + tdy * tdy;
+          if (td2 < bestD2) { bestD2 = td2; bestA = ta; bestB = tb; }
+        }
+      }
+      if (!bestA || !bestB) continue;
+      const d = Math.sqrt(bestD2) || 0.001;
+      const falloff = 1 - d / PLANT_TUNE.TIP_TO_TIP_ATTRACTION_RADIUS;
+      const ax = (bestB.x - bestA.x) / d * PLANT_TUNE.TIP_TO_TIP_ATTRACTION_STRENGTH * falloff;
+      const ay = (bestB.y - bestA.y) / d * PLANT_TUNE.TIP_TO_TIP_ATTRACTION_STRENGTH * falloff;
+      bestA.vx += ax * dt; bestA.vy += ay * dt;
+      bestB.vx -= ax * dt; bestB.vy -= ay * dt;
+      if (d <= PLANT_TUNE.TIP_CONNECT_RADIUS) {
+        this.tipLinks.push({ other, a: bestA, b: bestB, rest: Math.max(10, d), t: 0 });
+        other.tipLinks.push({ other: this, a: bestB, b: bestA, rest: Math.max(10, d), t: 0 });
+        this.connectedToPlant = true;
+        other.connectedToPlant = true;
+        this._emitGrowthFx(bestA.x, bestA.y, 1.2, 'link');
+        other._emitGrowthFx(bestB.x, bestB.y, 1.2, 'link');
+        return;
+      }
+    }
+    // Apply existing tip-link spring.
+    for (const link of this.tipLinks) {
+      if (!link.other || link.other.dead) continue;
+      const dx = link.b.x - link.a.x, dy = link.b.y - link.a.y;
+      const d = Math.hypot(dx, dy) || 0.0001;
+      const nx = dx / d, ny = dy / d;
+      const stretch = d - link.rest;
+      const k = 3.5;
+      const corr = clamp(stretch * k * dt, -3, 3);
+      link.a.vx += nx * corr * 0.5; link.a.vy += ny * corr * 0.5;
+      link.b.vx -= nx * corr * 0.5; link.b.vy -= ny * corr * 0.5;
+      link.t = (link.t || 0) + dt;
+    }
+  }
+
+  _checkRockAttachment(rocks) {
+    // Only one rock connection per structure, and one plant per rock.
+    for (const branch of this.branches) {
+      const tip = this._branchTip(branch);
+      if (!tip) continue;
+      for (const rock of rocks) {
+        if (rock._connectedPlant && rock._connectedPlant !== this) continue; // rock already claimed
+        const dx = tip.x - rock.x, dy = tip.y - rock.y;
+        const d = Math.hypot(dx, dy);
+        if (d > rock.maxR + 10) continue;
+        const surfaceR = rock._effectiveRadiusForCircle(Math.atan2(dy, dx), d, 2);
+        if (d <= surfaceR + 4) {
+          this.connectedToRock = true;
+          rock._connectedPlant = this;
+          this.rootRock = {
+            rock,
+            offsetX: this.x - rock.x,
+            offsetY: this.y - rock.y,
+            anchorNode: branch.node,
+          };
+          this._emitGrowthFx(tip.x, tip.y, 1.0, 'rock');
+          return;
+        }
+      }
+    }
+  }
+
+  _updateCreatureInteractions(dt, entities) {
+    // Branches: hard collision (push creature out). Leaves: drag/slowdown (passable).
+    const branchSlowFactor = Math.pow(PLANT_TUNE.CREATURE_BRANCH_SLOWDOWN, dt * 60);
+    const leafSlowFactor   = Math.pow(PLANT_TUNE.CREATURE_LEAF_SLOWDOWN,   dt * 60);
+    for (let ei = 0; ei < entities.length; ei++) {
+      const e = entities[ei];
+      if (!e || e.dead || e.r < 2) continue;
+      const erx = e.r + 60;
+      const dxp = e.x - this.x, dyp = e.y - this.y;
+      if (dxp * dxp + dyp * dyp > erx * erx + 360 * 360) continue;
+      let touchedBranch = false;
+      let touchedLeaf   = false;
+      for (const branch of this.branches) {
+        // Quick reject vs tip.
+        const tip = this._branchTip(branch);
+        if (!tip) continue;
+        const tdx = e.x - tip.x, tdy = e.y - tip.y;
+        if (tdx * tdx + tdy * tdy > (e.r + 80) * (e.r + 80)) continue;
+        // Branch segments: hard circle collision — push creature out.
+        const segR = 6;
+        for (const seg of branch.segments) {
+          const sdx = e.x - seg.x, sdy = e.y - seg.y;
+          const dd = Math.hypot(sdx, sdy) || 0.001;
+          const overlap = e.r + segR - dd;
+          if (overlap > 0) {
+            const nx = sdx / dd, ny = sdy / dd;
+            e.x += nx * overlap * 0.7;
+            e.y += ny * overlap * 0.7;
+            const velDot = e.vx * nx + e.vy * ny;
+            if (velDot < 0) { e.vx -= nx * velDot * 0.55; e.vy -= ny * velDot * 0.55; }
+            touchedBranch = true;
+          }
+        }
+        // Leaves: drag only — creatures pass through but are slowed.
+        for (const lf of branch.leaves) {
+          if (lf.baseX === undefined) continue;
+          const bx = lf.baseX, by = lf.baseY;
+          const dax = lf.tipX - bx, day = lf.tipY - by;
+          const lenSq = dax * dax + day * day || 1;
+          const tc = clamp(((e.x - bx) * dax + (e.y - by) * day) / lenSq, 0, 1);
+          const closestX = bx + tc * dax, closestY = by + tc * day;
+          const dd = Math.hypot(e.x - closestX, e.y - closestY) || 0.001;
+          if (dd < e.r + lf.r * 1.1) {
+            touchedLeaf = true;
+            const spd = Math.hypot(e.vx, e.vy);
+            lf._swayKick = (lf._swayKick || 0) + lf.leafSide * clamp(spd / 180, 0.01, 0.14);
+          }
+        }
+      }
+      if (touchedBranch) { e.vx *= branchSlowFactor; e.vy *= branchSlowFactor; }
+      if (touchedLeaf)   { e.vx *= leafSlowFactor;   e.vy *= leafSlowFactor;   }
+    }
+  }
+
+  // Herbivore eating: nibble the central node only. Leaves are obstacles, not food.
   eatFrom(ex, ey, eaterR, game, minChunk = 0, impactVx = 0, impactVy = 0) {
     let best = null, bestD2 = Infinity;
-    for (let i = 1; i < this.nodes.length; i++) {
-      const n = this.nodes[i];
-      if (n.r < minChunk) continue;
-      const d2 = dist2(ex, ey, n.x, n.y);
-      if (d2 < bestD2) { bestD2 = d2; best = n; }
+    // Nodes are protected until the plant has grown at least 10 leaves.
+    const growthLevel = this.branches.reduce((s, b) => s + b.leaves.length, 0);
+    if (growthLevel >= 10) {
+      for (const n of this.plantNodes) {
+        if (n.r < minChunk) continue;
+        const d2 = dist2(ex, ey, n.x, n.y);
+        if (d2 < bestD2) { bestD2 = d2; best = n; }
+      }
     }
     if (!best) return 0;
     const d = Math.sqrt(bestD2);
     if (d > eaterR + best.r + 12) return 0;
     const bite = Math.min(best.hp, 4);
     best.hp -= bite;
-    game.particles.burst(best.x, best.y, 3, { speed: 30, life: 0.4, r: 1.4, h: this.hue, s: 70, l: 65 });
+    best.r = Math.max((best.baseR || best.r) * 0.55, best.r * 0.92);
+    this._emitGrowthFx(best.x, best.y, Math.min(1.4, bite / 3), 'eat');
+    if (game && game.particles) {
+      game.particles.burst(best.x, best.y, 3, { speed: 30, life: 0.4, r: 1.4, h: this.hue, s: 70, l: 65 });
+    }
     if (best.hp <= 0) {
-      if (!best.parent) {
-        best.dead = true;
-      } else {
-        this._breakOff(best, impactVx, impactVy, game);
+      best.dead = true;
+      if (best.kind === 'leaf' && best.branch) {
+        // Removing a leaf shortens the branch by one segment.
+        const idx = best.branch.leaves.indexOf(best);
+        if (idx >= 0) {
+          best.branch.leaves.splice(idx, 1);
+          if (best.branch.segments[idx]) best.branch.segments.splice(idx, 1);
+          best.branch.done = false;
+        }
+      } else if (best.kind === 'node') {
+        // Eating a central node knocks loose chunks of plant food.
+        const idx = this.plantNodes.indexOf(best);
+        if (idx >= 0) this.plantNodes.splice(idx, 1);
       }
-      this.nodes = this.nodes.filter(n => !n.dead);
-      if (this.nodes.length < 2) this.dead = true;
+      this._refreshFlatNodes();
+      if (this.plantNodes.length === 0) this.dead = true;
     }
     return bite * 3.5;
   }
 
+  // ── Rendering ────────────────────────────────────────────────────────────
   draw(ctx, camX, camY, w, h) {
     const T_now = performance.now() * 0.001;
     const ox = -camX + w * 0.5;
     const oy = -camY + h * 0.5;
     const fade = Math.min(1, this.life / 8);
+    const INK = '#1a1024';
 
-    // stems
-    ctx.strokeStyle = hslaCSS(this.hue - 20, 50, 35, 0.7 * fade);
-    ctx.lineWidth = 1.5;
-    for (let i = 1; i < this.nodes.length; i++) {
-      const n = this.nodes[i];
-      const p = n.parent;
-      if (!p) continue;
-      ctx.beginPath();
-      ctx.moveTo(p.x + ox, p.y + oy);
-      ctx.lineTo(n.x + ox, n.y + oy);
-      ctx.stroke();
+    // Rock-anchor tether (drawn first, beneath stems).
+    if (this.connectedToRock && this.rootRock && this.rootRock.rock && !this.rootRock.rock._removed) {
+      const rock = this.rootRock.rock;
+      const sx = rock.x + ox, sy = rock.y + oy;
+      const px = this.x + ox, py = this.y + oy;
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = 4.2;
+      ctx.globalAlpha = 0.6 * fade;
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(px, py); ctx.stroke();
+      ctx.strokeStyle = hslaCSS(this.hue - 24, 38, 28, 1);
+      ctx.lineWidth = 2.6;
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(px, py); ctx.stroke();
+      ctx.globalAlpha = 1;
     }
 
-    // nodes (leaves)
-    for (let i = 1; i < this.nodes.length; i++) {
-      const n = this.nodes[i];
-      const sx = n.x + ox, sy = n.y + oy;
-      const pulse = 0.85 + 0.15 * Math.sin(T_now * 2 + i * 1.3);
-      const hpFrac = n.hp / n.maxHP;
-      const glow = n.r * 2.5;
-      const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, glow);
-      grad.addColorStop(0, hslaCSS(this.hue, 70, 70, 0.45 * fade * pulse));
-      grad.addColorStop(1, hslaCSS(this.hue, 70, 55, 0));
-      ctx.fillStyle = grad;
-      ctx.beginPath(); ctx.arc(sx, sy, glow, 0, TAU); ctx.fill();
-      ctx.fillStyle = hslaCSS(this.hue, 65, 55 + hpFrac * 15, 0.85 * fade);
-      ctx.beginPath(); ctx.arc(sx, sy, n.r * pulse, 0, TAU); ctx.fill();
+    // Plant-to-plant tether (drawn before stems).
+    for (const link of this.tipLinks) {
+      if (!link.other || link.other.dead) continue;
+      // Draw only once per pair (lower-x plant draws).
+      if (this.x > link.other.x) continue;
+      const ax = link.a.x + ox, ay = link.a.y + oy;
+      const bx = link.b.x + ox, by = link.b.y + oy;
+      const dx = bx - ax, dy = by - ay;
+      const d = Math.hypot(dx, dy) || 1;
+      const nx = -dy / d, ny = dx / d;
+      const bow = Math.min(14, d * 0.18);
+      const cx = (ax + bx) * 0.5 + nx * bow * 0.4;
+      const cy = (ay + by) * 0.5 + ny * bow * 0.4;
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = 4.4;
+      ctx.globalAlpha = 0.85 * fade;
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.quadraticCurveTo(cx, cy, bx, by); ctx.stroke();
+      ctx.strokeStyle = hslaCSS(((this.hue + link.other.hue) * 0.5) - 18, 46, 32, 1);
+      ctx.lineWidth = 2.6;
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.quadraticCurveTo(cx, cy, bx, by); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // Stems — bold ink outline + flat green fill, drawn from origin outward.
+    ctx.lineCap = 'round';
+    for (const branch of this.branches) {
+      let prevX = branch.origin.x + ox;
+      let prevY = branch.origin.y + oy;
+      for (let i = 0; i < branch.segments.length; i++) {
+        const seg = branch.segments[i];
+        const sx = seg.x + ox, sy = seg.y + oy;
+        const taper = 1 - i / Math.max(1, branch.maxLeaves) * 0.35;
+        const stemW = Math.max(2, (branch.isMain ? 3.4 : 2.6) * taper * Math.pow(this.scale, 0.35));
+        ctx.strokeStyle = INK;
+        ctx.globalAlpha = 0.92 * fade;
+        ctx.lineWidth = stemW + 1.6;
+        ctx.beginPath(); ctx.moveTo(prevX, prevY); ctx.lineTo(sx, sy); ctx.stroke();
+        ctx.strokeStyle = hslaCSS(this.hue - 20, 50, 30, 1);
+        ctx.lineWidth = stemW;
+        ctx.beginPath(); ctx.moveTo(prevX, prevY); ctx.lineTo(sx, sy); ctx.stroke();
+        prevX = sx; prevY = sy;
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // Central nodes — chunky storybook blob with 5 petal bumps.
+    for (const node of this.plantNodes) {
+      const sx = node.x + ox, sy = node.y + oy;
+      const r = node.r;
+      // outer ink blob (5 petals)
+      ctx.fillStyle = INK;
+      ctx.globalAlpha = 0.92 * fade;
+      ctx.beginPath();
+      for (let i = 0; i < node.petalAngles.length; i++) {
+        const pa = node.petalAngles[i] + Math.sin(T_now * 0.7 + i) * 0.05;
+        const px = sx + Math.cos(pa) * (r + 1.6);
+        const py = sy + Math.sin(pa) * (r + 1.6);
+        ctx.moveTo(px + r * 0.8, py);
+        ctx.arc(px, py, r * 0.78, 0, TAU);
+      }
+      ctx.fill();
+      // bright green petals
+      ctx.fillStyle = hslaCSS(this.hue, 64, 56, 1);
+      ctx.globalAlpha = fade;
+      ctx.beginPath();
+      for (let i = 0; i < node.petalAngles.length; i++) {
+        const pa = node.petalAngles[i] + Math.sin(T_now * 0.7 + i) * 0.05;
+        const px = sx + Math.cos(pa) * (r + 1.0);
+        const py = sy + Math.sin(pa) * (r + 1.0);
+        ctx.moveTo(px + r * 0.65, py);
+        ctx.arc(px, py, r * 0.65, 0, TAU);
+      }
+      ctx.fill();
+      // center hub
+      ctx.fillStyle = INK;
+      ctx.beginPath(); ctx.arc(sx, sy, r * 0.7 + 1.4, 0, TAU); ctx.fill();
+      ctx.fillStyle = hslaCSS(this.hue + 14, 70, 64, 1);
+      ctx.beginPath(); ctx.arc(sx, sy, r * 0.7, 0, TAU); ctx.fill();
+      // internal growth indicator: small inner pip per slot, sized by progress
+      for (let i = 0; i < node.internalSlots.length; i++) {
+        const slot = node.internalSlots[i];
+        const a = slot.angle + Math.sin(T_now * 1.2 + i) * 0.15;
+        const ix = sx + Math.cos(a) * r * 0.35;
+        const iy = sy + Math.sin(a) * r * 0.35;
+        const pipR = Math.max(0.6, slot.progress * r * 0.4);
+        ctx.fillStyle = hslaCSS(this.hue + 30, 80, 78, 0.9);
+        ctx.beginPath(); ctx.arc(ix, iy, pipR, 0, TAU); ctx.fill();
+      }
+      // sparkle
+      ctx.fillStyle = 'rgba(255,255,255,0.75)';
+      ctx.beginPath(); ctx.arc(sx - r * 0.3, sy - r * 0.35, Math.max(1.0, r * 0.18), 0, TAU); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Leaves — rooted at branch segment, pointed-oval extending perpendicular outward.
+    for (const branch of this.branches) {
+      for (let i = 0; i < branch.leaves.length; i++) {
+        const lf = branch.leaves[i];
+        if (lf.baseX === undefined) continue;
+        const bsx = lf.baseX + ox, bsy = lf.baseY + oy;
+        const hpFrac = clamp(lf.hp / lf.maxHP, 0, 1);
+        const pulse = 0.95 + 0.05 * Math.sin(T_now * 1.1 + i * 1.3);
+        const leafLen = lf.r * 3.0 * pulse;
+        const leafW   = lf.r * 1.0 * pulse;
+        ctx.save();
+        ctx.translate(bsx, bsy);
+        ctx.rotate(lf.perpAng); // extends in +x direction from root
+        ctx.globalAlpha = fade;
+        ctx.strokeStyle = INK;
+        ctx.lineWidth = Math.max(1.1, lf.r * 0.22);
+        ctx.fillStyle = hslaCSS(this.hue, 62, 50 + hpFrac * 14, 1);
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.quadraticCurveTo(leafLen * 0.5, leafW, leafLen, 0);
+        ctx.quadraticCurveTo(leafLen * 0.5, -leafW, 0, 0);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        // midrib
+        ctx.strokeStyle = hslaCSS(this.hue + 20, 55, 85, 0.55);
+        ctx.lineWidth = Math.max(0.4, lf.r * 0.1);
+        ctx.beginPath();
+        ctx.moveTo(leafLen * 0.05, 0); ctx.lineTo(leafLen * 0.9, 0);
+        ctx.stroke();
+        // highlight
+        ctx.fillStyle = 'rgba(255,255,255,0.55)';
+        ctx.beginPath();
+        ctx.ellipse(leafLen * 0.3, -leafW * 0.38, Math.max(0.4, leafLen * 0.1), Math.max(0.3, lf.r * 0.2), -0.15, 0, TAU);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // Growth FX — soft expanding ring + sparkle.
+    for (let i = 0; i < this.growthFx.length; i++) {
+      const fx = this.growthFx[i];
+      const k = clamp(fx.t / fx.life, 0, 1);
+      const fadeIn = clamp((1 - k) / 0.22, 0, 1);
+      const r = fx.r * (1 + (1 - k) * 0.85);
+      const a = 0.55 * fadeIn * k * fade;
+      const cx = fx.x + ox, cy = fx.y + oy;
+      const hueShift = fx.kind === 'link' ? -8 : fx.kind === 'rock' ? -30 : fx.kind === 'sprout' ? 20 : fx.kind === 'grab' ? 24 : 14;
+      ctx.strokeStyle = hslaCSS(this.hue + hueShift, 70, 60, a);
+      ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,' + (a * 0.7).toFixed(3) + ')';
+      ctx.beginPath(); ctx.arc(cx, cy, Math.max(1.1, r * 0.18), 0, TAU); ctx.fill();
     }
   }
 }
+
+// Back-compat alias — older save/spawn references may still use this name.
+const PlantCluster = PlantStructure;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ROCK — procedural polygon rocks with crevices
@@ -2628,6 +3445,39 @@ class Rock {
     this.light = 18 + rng() * 14;
     // Build convex hull radius for quick collision
     this.maxR = this.verts.reduce((m, v) => Math.max(m, v.r), 0) + 4;
+    // Gentle-to-moderate ambient motion
+    this.vx = (rng() - 0.5) * 2.2;
+    this.vy = (rng() - 0.5) * 2.2;
+    this.angle = rng() * TAU;
+    this.spin = (rng() - 0.5) * 0.55;
+    this.driftPhase = rng() * TAU;
+    this.driftAmp = 1.2 + rng() * 2.4;
+    this._driftT = rng() * 10;
+    // Mass approx for sticking: bigger rocks shove smaller ones less.
+    this.mass = this.maxR * this.maxR;
+  }
+
+  update(dt) {
+    this._driftT += dt;
+    // Slow sinusoidal wander — feels like underwater current nudging.
+    const ax = Math.cos(this.driftPhase + this._driftT * 0.27) * this.driftAmp * 0.55;
+    const ay = Math.sin(this.driftPhase * 1.3 + this._driftT * 0.21) * this.driftAmp * 0.55;
+    this.vx += ax * dt;
+    this.vy += ay * dt;
+    const damp = Math.max(0, 1 - dt * 0.09);
+    this.vx *= damp;
+    this.vy *= damp;
+    const maxV = 28;
+    const sp = Math.hypot(this.vx, this.vy);
+    if (sp > maxV) { this.vx = this.vx / sp * maxV; this.vy = this.vy / sp * maxV; }
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+    this.angle += this.spin * dt;
+    this.spin *= Math.max(0, 1 - dt * 0.12);
+    if (this.crevice) {
+      this.crevice.cx += this.vx * dt;
+      this.crevice.cy += this.vy * dt;
+    }
   }
 
   // Push an entity out of the rock if overlapping
@@ -2701,6 +3551,14 @@ class Rock {
 
     ctx.save();
     ctx.translate(sx, sy);
+
+    // Soft top-down drop shadow
+    ctx.fillStyle = 'rgba(18,8,28,0.34)';
+    ctx.beginPath();
+    ctx.ellipse(this.r * 0.12, this.r * 0.32, this.r * 1.05, this.r * 0.42, 0, 0, TAU);
+    ctx.fill();
+
+    // Silhouette path
     ctx.beginPath();
     for (let i = 0; i < this.verts.length; i++) {
       const v = this.verts[i];
@@ -2709,26 +3567,33 @@ class Rock {
     }
     ctx.closePath();
 
-    // rock fill with subtle gradient
-    const grad = ctx.createRadialGradient(-this.r * 0.2, -this.r * 0.2, 0, 0, 0, this.maxR);
-    grad.addColorStop(0, hslaCSS(this.hue, 14, this.light + 14, 1));
-    grad.addColorStop(1, hslaCSS(this.hue, 9, this.light, 1));
-    ctx.fillStyle = grad;
-    ctx.fill();
-
-    // bioluminescent rim glow
-    ctx.strokeStyle = hslaCSS(this.hue + 40, 60, 65, 0.22);
-    ctx.lineWidth = 2.5;
+    // Thick ink outline
+    ctx.strokeStyle = '#1a1024';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = Math.max(2.5, this.r * 0.11);
     ctx.stroke();
 
-    // crevice shadow
-    const cv = this.verts.reduce((best, v) => v.r < best.r ? v : best, this.verts[0]);
-    const cx2 = Math.cos(cv.a) * cv.r, cy2 = Math.sin(cv.a) * cv.r;
-    const cg = ctx.createRadialGradient(cx2, cy2, 0, cx2, cy2, this.r * 0.4);
-    cg.addColorStop(0, 'rgba(0,0,0,0.55)');
-    cg.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = cg;
-    ctx.beginPath(); ctx.arc(cx2, cy2, this.r * 0.4, 0, TAU); ctx.fill();
+    // Flat color fill
+    ctx.fillStyle = hslaCSS(this.hue, 24, Math.min(60, this.light + 22), 1);
+    ctx.fill();
+
+    // Lit cap (inside clipped silhouette)
+    ctx.save();
+    ctx.clip();
+    ctx.fillStyle = hslaCSS(this.hue + 6, 22, Math.min(85, this.light + 42), 0.65);
+    ctx.beginPath();
+    ctx.ellipse(-this.r * 0.3, -this.r * 0.4, this.r * 1.0, this.r * 0.55, -0.4, 0, TAU);
+    ctx.fill();
+    // Tiny moss/highlight specks
+    ctx.fillStyle = hslaCSS(this.hue + 80, 50, 80, 0.55);
+    for (let i = 0; i < 3; i++) {
+      const a = i * 1.7 + (this.hue * 0.01);
+      const rr = this.r * 0.55;
+      ctx.beginPath();
+      ctx.arc(Math.cos(a) * rr * 0.6, Math.sin(a) * rr * 0.6, 1.8, 0, TAU);
+      ctx.fill();
+    }
+    ctx.restore();
 
     ctx.restore();
   }
@@ -3031,7 +3896,7 @@ class Director {
     this.aggression = 0;
     this.spawnT = 0;
     this.foodT = 0;
-    this.hazardT = 4;
+    this.hazardT = 55 + rng() * 30; // first hazard plants appear after ~55–85s
     this.plantT = 6 + rng() * 6;
     this.eventT = 35 + rng() * 25;
     this.currentEvent = null;
@@ -3092,31 +3957,33 @@ class Director {
       this.apexPressureT = 22 + this.rng() * 16;
     }
 
-    // plant clusters — spawn near bloom/current/forest biomes
+    // plant matter — emit drifting plant chunks; they cluster organically into PlantStructure
     this.plantT -= dt;
-    if (this.plantT <= 0 && this.game.plants.length < T.PLANT_CAP) {
+    if (this.plantT <= 0) {
       const biome = biomeAt(Math.hypot(player.x, player.y));
-      if (['bloom', 'current', 'forest'].includes(biome.id)) {
-        const a = this.rng() * TAU;
-        const minD = Math.max(420, this.game.getSpawnExclusionRadius() + 120);
-        const maxD = minD + 900;
-        const d = minD + this.rng() * (maxD - minD);
-        const px = player.x + Math.cos(a) * d;
-        const py = player.y + Math.sin(a) * d;
-        const safe = this.game.findSafeSpawnPoint(px, py, 120, 10, 18, this.game.getSpawnExclusionRadius());
-        if (safe) {
-          const scale = clamp(this.game.getOutwardScaleAt(safe.x, safe.y), 1, 10);
-          this.game.plants.push(new PlantCluster(safe.x, safe.y, this.rng, scale));
+      if (['bloom', 'current', 'forest', 'shallow'].includes(biome.id) &&
+          this.game.foods.length < T.FOOD_CAP * 0.75) {
+        const count = 2 + Math.floor(this.rng() * 4);
+        for (let i = 0; i < count; i++) {
+          const a = this.rng() * TAU;
+          const minD = Math.max(340, this.game.getSpawnExclusionRadius() + 80);
+          const d = minD + this.rng() * 900;
+          const f = this.game.spawnFood(
+            player.x + Math.cos(a) * d,
+            player.y + Math.sin(a) * d,
+            'plant', biome, 3 + this.rng() * 1.5
+          );
+          if (f) { f.vx = (this.rng() - 0.5) * 12; f.vy = (this.rng() - 0.5) * 12; }
         }
       }
-      this.plantT = 8 + this.rng() * 10;
+      this.plantT = 5 + this.rng() * 8;
     }
 
     // hazards
     this.hazardT -= dt;
     if (this.hazardT <= 0 && this.game.hazards.length < T.HAZARD_CAP) {
       this.maybeSpawnHazard(player);
-      this.hazardT = 3 + this.rng() * 4.5;
+      this.hazardT = 28 + this.rng() * 22;
     }
 
     // biome transition notice
@@ -3282,10 +4149,9 @@ class Director {
     let type;
     if (biome.id === 'vent') type = this.rng() < 0.6 ? 'vent' : 'toxic';
     else if (biome.id === 'abyss') type = this.rng() < 0.5 ? 'deadzone' : 'toxic';
-    else if (biome.id === 'forest') type = this.rng() < 0.35 ? 'toxic' : this.rng() < 0.7 ? 'spine_weed' : this.rng() < 0.82 ? 'current' : 'curl_weed';
-    else if (biome.id === 'current') type = this.rng() < 0.48 ? 'current' : this.rng() < 0.76 ? 'spine_weed' : 'curl_weed';
-    else if (biome.id === 'bloom') type = this.rng() < 0.62 ? 'spine_weed' : 'curl_weed';
-    else return;
+    else if (biome.id === 'forest') type = this.rng() < 0.5 ? 'toxic' : 'current';
+    else if (biome.id === 'current') type = 'current';
+    else return; // bloom biome no longer spawns plant hazards
     const a = this.rng() * TAU;
     const d = 500 + this.rng() * 700;
     const x = player.x + Math.cos(a) * d;
@@ -3309,13 +4175,13 @@ class Director {
     switch (id) {
       case 'bloom':
         title = 'Plant Surge';
-        desc = 'Green structures rapidly branch through the zone.';
-        for (let i = 0; i < 8; i++) {
-          const a = this.rng() * TAU, d = 200 + this.rng() * 800;
-          const safe = this.game.findSafeSpawnPoint(player.x + Math.cos(a) * d, player.y + Math.sin(a) * d, 120, 8, 16, this.game.getSpawnExclusionRadius());
-          if (safe && this.game.plants.length < T.PLANT_CAP * 2) {
-            const scale = clamp(this.game.getOutwardScaleAt(safe.x, safe.y), 1, 10);
-            this.game.plants.push(new PlantCluster(safe.x, safe.y, this.rng, scale));
+        desc = 'Nutrients surge — plant matter blooms across the zone.';
+        for (let i = 0; i < 24; i++) {
+          const a = this.rng() * TAU, d = 180 + this.rng() * 820;
+          const px = player.x + Math.cos(a) * d, py = player.y + Math.sin(a) * d;
+          if (this.game.foods.length < T.FOOD_CAP) {
+            const f = this.game.spawnFood(px, py, 'plant', biomeAt(Math.hypot(px, py)), 3 + this.rng() * 1.5);
+            if (f) { f.vx = (this.rng() - 0.5) * 16; f.vy = (this.rng() - 0.5) * 16; }
           }
         }
         break;
@@ -3511,6 +4377,15 @@ class UI {
       pauseAudioBtn: document.getElementById('pause-audio-btn'),
       pauseResetZoomBtn: document.getElementById('pause-reset-zoom-btn'),
       pauseSettingsCloseBtn: document.getElementById('pause-settings-close-btn'),
+      pauseControlsBtn: document.getElementById('pause-controls-btn'),
+      controlsRebindPanel: document.getElementById('controls-rebind-panel'),
+      controlsResetBtn: document.getElementById('controls-reset-btn'),
+      devTools: document.getElementById('dev-tools'),
+      devCloseBtn: document.getElementById('dev-close-btn'),
+      devSoftStatus: document.getElementById('dev-soft-status'),
+      devSoftToggleBtn: document.getElementById('dev-soft-toggle-btn'),
+      devSoftRespawnBtn: document.getElementById('dev-soft-respawn-btn'),
+      devOpenLabBtn: document.getElementById('dev-open-lab-btn'),
       gameOver: document.getElementById('game-over'),
       deathCause: document.getElementById('death-cause'),
       summary: document.getElementById('summary-grid'),
@@ -3695,9 +4570,18 @@ class UI {
 
   showPause(on) { this.el.pauseOverlay.classList.toggle('show', on); }
 
+  showDevTools(on) {
+    if (this.el.devTools) this.el.devTools.classList.toggle('show', on);
+  }
+
   showPauseSettings(on) {
     if (!this.el.pauseSettingsPanel) return;
     this.el.pauseSettingsPanel.style.display = on ? 'block' : 'none';
+  }
+
+  setSoftCreatureStatus(enabled, count) {
+    if (this.el.devSoftStatus) this.el.devSoftStatus.textContent = enabled ? `On · ${count}` : 'Off';
+    if (this.el.devSoftToggleBtn) this.el.devSoftToggleBtn.textContent = enabled ? 'Disable Soft Creatures' : 'Enable Soft Creatures';
   }
 
   setAudioLabel(isOn) {
@@ -3778,6 +4662,9 @@ class Game {
     this.particles = new ParticlePool(700);
     this.grid = new SpatialGrid(T.GRID_CELL);
     this.creatures = [];
+    this.softCreatures = [];
+    this.softPlayer = null;
+    this.softCreatureLookup = new Map();
     this.foods = [];
     this.partShards = [];
     this.hazards = [];
@@ -3799,6 +4686,8 @@ class Game {
     this.lastBiomeId = null;
     this.codexRecent = '';
     this.gameOver = false;
+    this._devWasPaused = false;
+    this._softSpawnSerial = 0;
     this.generatedRockRings = new Set();
     this.isMobile = window.matchMedia('(pointer: coarse)').matches || window.innerWidth < 900;
     if (this.isMobile) {
@@ -3814,6 +4703,16 @@ class Game {
     window.addEventListener('resize', () => this.resize());
     Input.attach(this.canvas);
     window.addEventListener('keydown', (e) => {
+      if (e.code === 'Backquote') {
+        e.preventDefault();
+        this.toggleDevTools();
+        return;
+      }
+      if (e.key === 'Escape' && this.ui.el.devTools && this.ui.el.devTools.classList.contains('show')) {
+        e.preventDefault();
+        this.toggleDevTools(false);
+        return;
+      }
       if (e.key === 'Escape' && this.running && !this.gameOver && !this.mutationActive && !this.milestoneActive) {
         e.preventDefault();
         this.setPaused(!this.paused);
@@ -3830,6 +4729,40 @@ class Game {
     if (this.ui.el.pauseResetZoomBtn) this.ui.el.pauseResetZoomBtn.addEventListener('click', () => { this.zoom = this.isMobile ? 0.9 : 1.0; });
     if (this.ui.el.pauseQuitMenuBtn) this.ui.el.pauseQuitMenuBtn.addEventListener('click', () => this.quitToMenu());
     if (this.ui.el.pauseQuitDesktopBtn) this.ui.el.pauseQuitDesktopBtn.addEventListener('click', () => this.quitToDesktop());
+
+    // Controls rebinding panel
+    if (this.ui.el.pauseControlsBtn) {
+      this.ui.el.pauseControlsBtn.addEventListener('click', () => {
+        const panel = this.ui.el.controlsRebindPanel;
+        if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+      });
+    }
+    if (this.ui.el.controlsResetBtn) {
+      this.ui.el.controlsResetBtn.addEventListener('click', () => {
+        Controls.reset();
+        this._updateRebindLabels();
+      });
+    }
+    // Wire rebind buttons
+    this._rebindListening = null;
+    this._initRebindButtons();
+
+    // Action menu close
+    const actionMenuCloseBtn = document.getElementById('action-menu-close-btn');
+    if (actionMenuCloseBtn) actionMenuCloseBtn.addEventListener('click', () => this.toggleActionMenu());
+    if (this.ui.el.devCloseBtn) this.ui.el.devCloseBtn.addEventListener('click', () => this.toggleDevTools(false));
+    if (this.ui.el.devSoftToggleBtn) this.ui.el.devSoftToggleBtn.addEventListener('click', () => this.setSoftCreaturesEnabled(!this.softCreaturesEnabled()));
+    if (this.ui.el.devSoftRespawnBtn) this.ui.el.devSoftRespawnBtn.addEventListener('click', () => {
+      this.rebuildSoftCreatures();
+      this.ui.toast('SOFT CREATURES · RESPAWNED');
+    });
+    if (this.ui.el.devOpenLabBtn) this.ui.el.devOpenLabBtn.addEventListener('click', () => {
+      window.location.href = 'creature-lab.html';
+    });
+    this.ui.setSoftCreatureStatus(this.softCreaturesEnabled(), this.softCreatures.length);
+
+    // ── Creature Stats dev sliders ──────────────────────────────────────────
+    this._initCreatureStatsDevUI();
 
     // pre-fill seed from URL param or save
     const save = Save.load();
@@ -3905,6 +4838,709 @@ class Game {
   toggleAudio() {
     if (Audio.enabled) { Audio.disable(); this.ui.setAudioLabel(false); }
     else { Audio.enable(); this.ui.setAudioLabel(true); }
+  }
+
+  softCreaturesEnabled() {
+    return !!window.DRIFT_USE_SOFT_CREATURES && !!window.DriftCreatures && typeof window.DriftCreatures.createCreature === 'function';
+  }
+
+  softPrototypeAuthorityEnabled() {
+    return this.softCreaturesEnabled() && window.DRIFT_USE_SOFT_PROTOTYPE_AUTHORITY !== false;
+  }
+
+  // ── Controls rebinding helpers ─────────────────────────────────────────────
+  _initRebindButtons() {
+    const buttons = document.querySelectorAll('.bind-btn[data-action]');
+    this._updateRebindLabels();
+    buttons.forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (this._rebindListening) {
+          this._rebindListening.classList.remove('listening');
+          this._rebindListening.textContent = Controls.labelFor(this._rebindListening.dataset.action);
+          this._rebindListening = null;
+        }
+        btn.classList.add('listening');
+        btn.textContent = '…';
+        this._rebindListening = btn;
+      });
+    });
+    // Capture the next keydown to assign the binding
+    window.addEventListener('keydown', (e) => {
+      if (!this._rebindListening) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const action = this._rebindListening.dataset.action;
+      if (e.key !== 'Escape') {
+        Controls.bind(action, e.key);
+      }
+      this._rebindListening.classList.remove('listening');
+      this._rebindListening.textContent = Controls.labelFor(action);
+      this._rebindListening = null;
+    }, true); // capture phase so it fires before other listeners
+  }
+
+  _updateRebindLabels() {
+    document.querySelectorAll('.bind-btn[data-action]').forEach(btn => {
+      btn.textContent = Controls.labelFor(btn.dataset.action);
+    });
+  }
+
+  // ── Creature Stats dev panel ───────────────────────────────────────────────
+  _initCreatureStatsDevUI() {
+    const tuning = window.DriftCreatures && window.DriftCreatures.tuning;
+    if (!tuning) return;
+
+    // Map: [sliderId, readoutId, tuningKey, fmt]
+    const rows = [
+      ['dev-speed-base',  'dev-speed-base-val',  'speedBase',      v => String(Math.round(v))],
+      ['dev-speed-max',   'dev-speed-max-val',   'speedMax',       v => String(Math.round(v))],
+      ['dev-speed-gmul',  'dev-speed-gmul-val',  'speedGrowthMul', v => v.toFixed(2) + '×'],
+      ['dev-damage-base', 'dev-damage-base-val', 'damageBase',     v => String(Math.round(v))],
+      ['dev-damage-gmul', 'dev-damage-gmul-val', 'damageGrowthMul',v => v.toFixed(2) + '×'],
+      ['dev-turn-base',   'dev-turn-base-val',   'turnBase',       v => v.toFixed(2)],
+      ['dev-turn-max',    'dev-turn-max-val',    'turnMax',        v => v.toFixed(2)],
+      ['dev-turn-gmul',   'dev-turn-gmul-val',   'turnGrowthMul',  v => v.toFixed(2) + '×'],
+      ['dev-aware-base',  'dev-aware-base-val',  'awareBase',      v => String(Math.round(v))],
+      ['dev-aware-max',   'dev-aware-max-val',   'awareMax',       v => String(Math.round(v))],
+      ['dev-aware-gmul',  'dev-aware-gmul-val',  'awareGrowthMul', v => v.toFixed(2) + '×'],
+    ];
+
+    const syncReadouts = () => {
+      for (const [sid, rid, key, fmt] of rows) {
+        const readout = document.getElementById(rid);
+        const slider  = document.getElementById(sid);
+        if (readout) readout.textContent = fmt(tuning[key]);
+        if (slider)  slider.value = tuning[key];
+      }
+    };
+
+    // Wire each slider to update tuning + save
+    for (const [sid, rid, key, fmt] of rows) {
+      const slider  = document.getElementById(sid);
+      const readout = document.getElementById(rid);
+      if (!slider) continue;
+      slider.addEventListener('input', () => {
+        const v = parseFloat(slider.value);
+        if (Number.isFinite(v)) {
+          tuning[key] = v;
+          if (readout) readout.textContent = fmt(v);
+          tuning.save();
+        }
+      });
+    }
+
+    // Reset to defaults
+    const resetBtn = document.getElementById('dev-stats-reset-btn');
+    if (resetBtn) {
+      resetBtn.addEventListener('click', () => {
+        for (const k in tuning.defaults) tuning[k] = tuning.defaults[k];
+        tuning.save();
+        syncReadouts();
+        this.ui.toast('CREATURE STATS · DEFAULTS RESTORED');
+      });
+    }
+
+    // Copy config to clipboard
+    const copyBtn = document.getElementById('dev-stats-copy-btn');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', () => {
+        const lines = [
+          '// ── Paste these lines into the DriftCreatures.tuning defaults block ──',
+          '//    in js/creatures/creature-genome.js',
+          `speedBase:      ${tuning.speedBase},`,
+          `speedMax:       ${tuning.speedMax},`,
+          `speedGrowthMul: ${tuning.speedGrowthMul},`,
+          `damageBase:     ${tuning.damageBase},`,
+          `damageGrowthMul:${tuning.damageGrowthMul},`,
+          `turnBase:       ${tuning.turnBase},`,
+          `turnMax:        ${tuning.turnMax},`,
+          `turnGrowthMul:  ${tuning.turnGrowthMul},`,
+          `awareBase:      ${tuning.awareBase},`,
+          `awareMax:       ${tuning.awareMax},`,
+          `awareGrowthMul: ${tuning.awareGrowthMul},`,
+        ];
+        const text = lines.join('\n');
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text)
+            .then(() => this.ui.toast('CONFIG COPIED TO CLIPBOARD'))
+            .catch(() => { console.log(text); this.ui.toast('SEE CONSOLE FOR CONFIG'); });
+        } else {
+          console.log(text);
+          this.ui.toast('SEE CONSOLE FOR CONFIG');
+        }
+      });
+    }
+
+    // Sync readouts whenever the dev panel opens
+    const origShow = this.ui.showDevTools.bind(this.ui);
+    this.ui.showDevTools = (on) => {
+      origShow(on);
+      if (on) syncReadouts();
+    };
+
+    // Initial sync in case panel is already open
+    syncReadouts();
+  }
+
+  toggleDevTools(force) {
+    const isOpen = !!(this.ui.el.devTools && this.ui.el.devTools.classList.contains('show'));
+    const next = force === undefined ? !isOpen : !!force;
+    if (next === isOpen) return;
+
+    if (next) {
+      this._devWasPaused = this.paused;
+      this.paused = true;
+      this.ui.showPause(false);
+      this.ui.showPauseSettings(false);
+      this.ui.setSoftCreatureStatus(this.softCreaturesEnabled(), this.softCreatures.length);
+    } else {
+      this.paused = this._devWasPaused;
+      this._devWasPaused = false;
+    }
+
+    this.ui.showDevTools(next);
+  }
+
+  setSoftCreaturesEnabled(enabled) {
+    const next = !!enabled && !!window.DriftCreatures && typeof window.DriftCreatures.createCreature === 'function';
+    window.DRIFT_USE_SOFT_CREATURES = next;
+    if (next) this.rebuildSoftCreatures();
+    else {
+      this.softCreatures.length = 0;
+      this.softPlayer = null;
+      this.softCreatureLookup.clear();
+    }
+    this.ui.setSoftCreatureStatus(this.softCreaturesEnabled(), this.softCreatures.length);
+    this.ui.toast(next ? 'SOFT CREATURES · ON' : 'SOFT CREATURES · OFF');
+  }
+
+  getSoftSourceParts(source) {
+    if (Array.isArray(source.parts)) return source.parts.slice();
+    if (source.discoveredParts && typeof source.discoveredParts.values === 'function') return Array.from(source.discoveredParts);
+    return [];
+  }
+
+  getBiomeTierNumberAt(x, y) {
+    const biome = biomeAt(Math.hypot(x, y));
+    const idx = BIOMES.findIndex((b) => b.id === biome.id);
+    return clamp(idx + 1, 1, 3);
+  }
+
+  getSoftPartTypeForLegacy(partId) {
+    switch (partId) {
+      case 'eyespot': return 'eye';
+      case 'mandible': return 'carnivoreMouth';
+      case 'filtermouth': return 'herbivoreMouth';
+      case 'fin': return 'fin';
+      case 'cilia': return 'fin';
+      case 'tendril': return 'weapon';
+      case 'tail': return 'tail';
+      case 'spike': return 'weapon';
+      case 'plate': return 'defense';
+      case 'frill': return 'defense';
+      default: return null;
+    }
+  }
+
+  getSoftPartVariantCount(type) {
+    if (type === 'eye') return 5;
+    if (type === 'herbivoreMouth' || type === 'carnivoreMouth' || type === 'omnivoreMouth') return 25;
+    if (type === 'fin' || type === 'tail' || type === 'weapon' || type === 'defense') return 25;
+    return 12;
+  }
+
+  hslToSoftHex(h, s, l) {
+    const hue = (((h % 360) + 360) % 360) / 360;
+    const sat = clamp((s || 60) / 100, 0, 1);
+    const lig = clamp((l || 60) / 100, 0, 1);
+    let r, g, b;
+
+    if (sat === 0) {
+      r = g = b = lig;
+    } else {
+      const q = lig < 0.5 ? lig * (1 + sat) : lig + sat - lig * sat;
+      const p = 2 * lig - q;
+      const hue2rgb = (t) => {
+        let tt = t;
+        if (tt < 0) tt += 1;
+        if (tt > 1) tt -= 1;
+        if (tt < 1 / 6) return p + (q - p) * 6 * tt;
+        if (tt < 1 / 2) return q;
+        if (tt < 2 / 3) return p + (q - p) * (2 / 3 - tt) * 6;
+        return p;
+      };
+      r = hue2rgb(hue + 1 / 3);
+      g = hue2rgb(hue);
+      b = hue2rgb(hue - 1 / 3);
+    }
+
+    const toHex = (v) => Math.round(v * 255).toString(16).padStart(2, '0');
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  }
+
+  createSoftVisualForCreature(source) {
+    const D = window.DriftCreatures;
+
+    // Use the same seeded genome system as the creature lab.
+    // This gives each creature varied elongation (0.82–1.55), rich part
+    // compositions (fins, tails, weapons, defense), and varied wobble/softness
+    // — instead of the flat manual genome that produced identical round bodies.
+    const genomeSeed = hashStringSeed(
+      String(source.bornAt || 0) + ':' +
+      (source.templateId || source.name || source.kind || 'entity')
+    ) % 999983;
+
+    // Higher tier = more parts (weapons, defense) if the creature has grown.
+    const tier = Math.max(1, Math.min(3, (source.growthLevel || 0) + 1));
+
+    const genome = D.generateCreatureGenome(genomeSeed, tier);
+
+    // Scale part sizes proportionally so the visual matches the source radius.
+    const scaleRatio = (source.r * 0.92) / Math.max(1, genome.body.baseRadius);
+    genome.body.baseRadius = source.r * 0.92;
+    for (let i = 0; i < genome.parts.length; i++) {
+      genome.parts[i].size *= scaleRatio;
+    }
+
+    // Override colors from the source creature to preserve biome/ecosystem identity.
+    const hue    = Number.isFinite(source.hue) ? source.hue : (Number.isFinite(source.creatorHue) ? source.creatorHue : 190);
+    const sat    = Number.isFinite(source.sat) ? source.sat : 64;
+    const light  = Number.isFinite(source.light) ? source.light : 62;
+    genome.colors.body   = this.hslToSoftHex(hue, sat, light);
+    genome.colors.accent = this.hslToSoftHex(hue + 18, Math.min(100, sat + 12), Math.min(92, light + 14));
+    genome.colors.detail = this.hslToSoftHex(hue - 24, Math.max(18, sat * 0.55), Math.max(12, light * 0.35));
+
+    // Ensure body is created at full size (not juvenile) since size is driven by the legacy sim.
+    genome.growth.juvenileScale = 1;
+    genome.growth.adultScale    = 1;
+    genome.growth.growthRate    = 0;
+
+    const creature = new D.Creature(genome, source.x, source.y);
+    creature.sourceCreature   = source;
+    creature.baseSourceRadius = Math.max(1, source.r);
+    creature.motionPhase      = (genomeSeed % 997) / 997;
+    creature.isLegendary      = !!source.legendary;
+    creature.label            = source.legendary ? source.name : '';
+    // Stagger animation phase so creatures don't all wiggle in sync.
+    creature.time             = (genomeSeed % 997) / 997 * 3.0;
+    creature.growthLevel      = source.growthLevel || 0;
+    creature.growth.currentScale   = 1;
+    creature.growth.growthProgress = 1;
+    creature.growth.pendingGrowth  = 0;
+    creature.growth.isAdult        = true;
+    creature.isPlayer   = !!source.isPlayer;
+    if (source.isPlayer) creature.label = 'You';
+    for (let i = 0; i < creature.parts.length; i++) {
+      creature.parts[i].growth = 1;
+      creature.parts[i].active = true;
+    }
+    return creature;
+  }
+
+  ensureSoftPlayerCreature() {
+    if (!this.softCreaturesEnabled() || !this.player) {
+      this.softPlayer = null;
+      return;
+    }
+    if (!this.softPlayer || this.softPlayer.sourceCreature !== this.player) {
+      this.softPlayer = this.createSoftVisualForCreature(this.player);
+      this.softPlayer.isPlayer = true;
+      this.softPlayer.label = 'You';
+      this.softPlayer.sourceCreature = this.player;
+      this.softPlayer.baseSourceRadius = Math.max(1, this.player.r);
+    }
+  }
+
+  syncSoftPlayerVisual(dt) {
+    if (!this.softCreaturesEnabled() || !this.player) return;
+    this.ensureSoftPlayerCreature();
+    if (!this.softPlayer) return;
+    const p = this.player;
+    const visual = this.softPlayer;
+
+    visual.time       += dt;
+    visual.isPlayer    = true;
+    visual.label       = 'You';
+    visual.hitFlash    = p.hitFlash    || 0;
+    visual.growthPulse = p.growthPulse || 0;
+    visual.eatenMark   = p.eatenMark   || 0;
+    visual.growthLevel = p.growthLevel || 0;
+    visual._targetR    = p.r;
+
+    const [iax, iay] = Input.axis();
+    const k = this._computeSoftSwimHeading(visual, dt, p.vx || 0, p.vy || 0, iax, iay);
+    const speed = k.speed;
+
+    for (let i = 0; i < visual.parts.length; i++) window.DriftCreatures.updateCreaturePart(visual.parts[i], dt);
+    this._swimBodyWave(visual, dt, k.heading, speed, k.turnRate, p.x, p.y);
+  }
+
+  // Shared heading/turn solver for both player and NPC soft visuals.
+  // Uses velocity when moving, optional intent when nearly still, and hysteresis
+  // to prevent heading flicker around zero-speed.
+  _computeSoftSwimHeading(visual, dt, vx, vy, intentX, intentY) {
+    const speed = Math.hypot(vx || 0, vy || 0);
+    const prevH = Number.isFinite(visual.heading) ? visual.heading : Math.atan2(vy || 0, vx || 1);
+    const enterSpeed = 7.5;
+    const exitSpeed = 4.5;
+
+    if (speed >= enterSpeed) visual._swimMoving = true;
+    else if (speed <= exitSpeed) visual._swimMoving = false;
+    else if (typeof visual._swimMoving !== 'boolean') visual._swimMoving = speed > (enterSpeed + exitSpeed) * 0.5;
+
+    const im = Math.hypot(intentX || 0, intentY || 0);
+    const hasIntent = im > 0.12;
+
+    let targetHeading = prevH;
+    if (visual._swimMoving) {
+      targetHeading = Math.atan2(vy || 0, vx || 1);
+    } else if (hasIntent) {
+      targetHeading = Math.atan2(intentY, intentX);
+    }
+
+    let td = targetHeading - prevH;
+    while (td > Math.PI) td -= TAU;
+    while (td < -Math.PI) td += TAU;
+
+    const maxTurnPerSec = 2.1 + Math.min(1.7, speed * 0.017);
+    const maxTurnStep = maxTurnPerSec * Math.max(dt, 0.001);
+    const clampedTd = Math.max(-maxTurnStep, Math.min(maxTurnStep, td));
+    const heading = prevH + clampedTd;
+    const rawTurnRate = clampedTd / Math.max(dt, 0.001);
+
+    const prevTurn = Number.isFinite(visual.turnRate) ? visual.turnRate : 0;
+    const turnRate = prevTurn * 0.84 + rawTurnRate * 0.16;
+
+    return { heading, turnRate, speed };
+  }
+
+  drawSoftPlayer(ctx, w, h) {
+    if (!this.softCreaturesEnabled() || !this.softPlayer) return;
+    const D = window.DriftCreatures;
+    const creature = this.softPlayer;
+    const center = D.getBodyCenter(creature.body);
+    const visibleR = this.getRenderRadius() + 260;
+    const dx = center.x - this.camX;
+    const dy = center.y - this.camY;
+    if (dx * dx + dy * dy > visibleR * visibleR) return;
+
+    ctx.save();
+    ctx.translate(-this.camX + w * 0.5, -this.camY + h * 0.5);
+    creature.render(ctx);
+    ctx.restore();
+  }
+
+  rebuildSoftCreatures() {
+    this.softCreatures.length = 0;
+    this.softCreatureLookup.clear();
+    this.softPlayer = null;
+    if (!this.softCreaturesEnabled() || !this.player) {
+      this.ui.setSoftCreatureStatus(this.softCreaturesEnabled(), this.softCreatures.length);
+      return;
+    }
+
+    for (let i = 0; i < this.creatures.length; i++) {
+      const source = this.creatures[i];
+      if (!source || source.dead) continue;
+      const visual = this.createSoftVisualForCreature(source);
+      this.softCreatureLookup.set(source, visual);
+      this.softCreatures.push(visual);
+    }
+    this.ensureSoftPlayerCreature();
+    this.ui.setSoftCreatureStatus(this.softCreaturesEnabled(), this.softCreatures.length);
+  }
+
+  ensureSoftCreatures() {
+    if (!this.softCreaturesEnabled()) return;
+
+    const live = new Set();
+    for (let i = 0; i < this.creatures.length; i++) {
+      const source = this.creatures[i];
+      if (!source || source.dead) continue;
+      live.add(source);
+      if (!this.softCreatureLookup.has(source)) {
+        const visual = this.createSoftVisualForCreature(source);
+        this.softCreatureLookup.set(source, visual);
+        this.softCreatures.push(visual);
+      }
+    }
+
+    this.softCreatures = this.softCreatures.filter((visual) => live.has(visual.sourceCreature));
+    for (const [source] of Array.from(this.softCreatureLookup.entries())) {
+      if (!live.has(source)) this.softCreatureLookup.delete(source);
+    }
+
+    this.ensureSoftPlayerCreature();
+
+    this.ui.setSoftCreatureStatus(this.softCreaturesEnabled(), this.softCreatures.length);
+  }
+
+  resolveSoftCreatureRockCollisions() {
+    if (!this.softCreaturesEnabled()) return;
+
+    for (let i = 0; i < this.softCreatures.length; i++) {
+      const creature = this.softCreatures[i];
+      const center = window.DriftCreatures.getBodyCenter(creature.body);
+      const approxR = creature.getApproxSize();
+
+      for (let r = 0; r < this.rocks.length; r++) {
+        const rock = this.rocks[r];
+        const cdx = center.x - rock.x;
+        const cdy = center.y - rock.y;
+        if (cdx * cdx + cdy * cdy > (rock.maxR + approxR + 24) * (rock.maxR + approxR + 24)) continue;
+
+        for (let n = 0; n < creature.body.nodes.length; n++) {
+          const node = creature.body.nodes[n];
+          const dx = node.x - rock.x;
+          const dy = node.y - rock.y;
+          const d = Math.hypot(dx, dy) || 0.0001;
+          if (d > rock.maxR + 6) continue;
+          const angle = Math.atan2(dy, dx);
+          const rockR = rock._effectiveRadiusForCircle(angle, d, 2.2);
+          if (d >= rockR + 1.2) continue;
+          const nx = dx / d;
+          const ny = dy / d;
+          node.x = rock.x + nx * (rockR + 1.2);
+          node.y = rock.y + ny * (rockR + 1.2);
+        }
+      }
+
+      window.DriftCreatures.solveSoftBodyConstraints(creature.body);
+      window.DriftCreatures.applySoftBodyPressure(creature.body);
+    }
+  }
+
+  // ── Kinematic Cell-Stage Locomotion (Spore-inspired) ───────────────────────
+  // Purely visual microbe motion: rhythmic power stroke, squash/stretch,
+  // perimeter ripple, and rear sweep. Both player and NPC visuals use this
+  // exact same mechanic to keep movement language consistent.
+  //
+  // This remains kinematic (no Verlet integration) so node positions are always
+  // stable and never collapse or spin due to physics solver artifacts.
+  _swimBodyWave(visual, dt, heading, speed, turnRate, cx, cy) {
+    visual.heading  = heading;
+    visual.facing.x = Math.cos(heading);
+    visual.facing.y = Math.sin(heading);
+
+    const fx = visual.facing.x;
+    const fy = visual.facing.y;
+
+    const body = visual.body;
+    const N    = body.nodes.length;
+    const elong = visual.genome.body.elongation || 1.0;
+
+    // Smoothly track source radius so growth doesn't snap visually.
+    const R = visual._smoothR || visual.genome.body.baseRadius || 20;
+    visual._smoothR = R + ((visual._targetR || R) - R) * Math.min(1, dt * 5.5);
+
+    // Stroke model: fast power stroke + slower recovery (cell/cilia feel).
+    const normalSpeed = Math.min(1, speed / 100);
+    const strokeHz = 1.9 + normalSpeed * 2.0;
+    const strokePhase = visual.time * strokeHz * TAU + (visual.motionPhase || 0) * TAU;
+    const strokeSin = Math.sin(strokePhase);
+    const kick = Math.max(0, strokeSin);
+    const recover = Math.max(0, -strokeSin);
+
+    // Global squash/stretch through each stroke.
+    const stretchFwd = 1 + kick * 0.10 - recover * 0.04;
+    const stretchLat = 1 - kick * 0.08 + recover * 0.05;
+    const halfFwd = visual._smoothR * elong * stretchFwd;
+    const halfLat = visual._smoothR * stretchLat;
+
+    // Turn curvature is intentionally damped to avoid twitching.
+    const bend = Math.max(-2.4, Math.min(2.4, turnRate || 0));
+
+    for (let i = 0; i < N; i++) {
+      const angle = (i / N) * TAU;
+
+      // Rest position on ellipse in body-local space.
+      // angle = 0  → front of body (head, in facing direction)
+      // angle = π  → rear  of body (tail, opposite facing)
+      const localFwd = Math.cos(angle) * halfFwd;   // + = front
+      const localLat = Math.sin(angle) * halfLat;   // lateral rest offset
+
+      // Normalized body position: 0 = head, 1 = tail.
+      const bodyPos = (halfFwd - localFwd) / Math.max(1, 2 * halfFwd);
+
+      // Rear emphasis for sweep/turn and calmer head motion.
+      const rearT    = Math.max(0, (bodyPos - 0.35) / 0.65);
+      const headT    = 1 - bodyPos;
+
+      // Perimeter ripple mimics cilia/metachronal motion around the membrane.
+      const rimPhase = angle * 1.8 - visual.time * (3.2 + normalSpeed * 1.5) + (visual.motionPhase || 0) * TAU;
+      const rimDisp = Math.sin(rimPhase) * visual._smoothR * (0.018 + normalSpeed * 0.032);
+
+      // Rear sweep provides directional swimming like a flexible tail region.
+      const sweepPhase = bodyPos * TAU * 0.86 - visual.time * (2.2 + normalSpeed * 1.25);
+      const rearSweep = Math.sin(sweepPhase) * visual._smoothR * (0.05 + normalSpeed * 0.08) * Math.pow(rearT, 1.25);
+
+      // Turning bends mostly the rear half and keeps face stable.
+      const bendDisp = bend * visual._smoothR * 0.020 * rearT * rearT;
+
+      // Tiny idle wobble keeps slow movers alive-looking instead of frozen.
+      const idleWobble = (1 - normalSpeed) * Math.sin(visual.time * 2.8 + angle * 2.1) * visual._smoothR * 0.012;
+
+      const totalLat = localLat + rimDisp + rearSweep + bendDisp + idleWobble;
+
+      // Fore/aft recoil: front and rear move opposite during power stroke,
+      // preserving center while giving a pulsing cell-stage feel.
+      const recoil = (kick - recover * 0.35) * visual._smoothR * 0.055;
+      const localFwdAdj = localFwd - recoil * (bodyPos - 0.5) * (0.45 + headT * 0.2);
+
+      // Rotate body-local coords by heading into world space.
+      // forward basis: (fx, fy)   lateral-left basis: (lx, ly) = (-fy, fx)
+      body.nodes[i].x    = cx + localFwdAdj * fx - totalLat * fy;
+      body.nodes[i].y    = cy + localFwdAdj * fy + totalLat * fx;
+      // Zero velocity — kinematic positions are authoritative, no Verlet needed.
+      body.nodes[i].prevX = body.nodes[i].x;
+      body.nodes[i].prevY = body.nodes[i].y;
+      body.nodes[i].vx   = 0;
+      body.nodes[i].vy   = 0;
+    }
+    // No physics step — positions are computed analytically.
+  }
+
+  syncSoftCreatureVisual(visual, dt) {
+    const source = visual.sourceCreature;
+    if (!source || source.dead) return;
+
+    visual.time        += dt;
+    visual.isLegendary  = !!source.legendary;
+    visual.label        = source.legendary ? source.name : '';
+    visual.behavior     = source.state || source.behavior;
+    visual.mood         = source.dead ? 'injured' : source.scared > 0.65 ? 'afraid' : source.angry > 0.6 ? 'aggressive' : source.hunger > 0.6 ? 'hungry' : 'calm';
+    visual.growthLevel  = source.growthLevel || 0;
+    visual.hitFlash     = source.hitFlash    || 0;
+    visual.growthPulse  = source.growthPulse || 0;
+    visual.eatenMark    = source.eatenMark   || 0;
+    visual._targetR     = source.r;
+
+    const k = this._computeSoftSwimHeading(visual, dt, source.vx || 0, source.vy || 0, 0, 0);
+
+    for (let i = 0; i < visual.parts.length; i++) window.DriftCreatures.updateCreaturePart(visual.parts[i], dt);
+    this._swimBodyWave(visual, dt, k.heading, k.speed, k.turnRate, source.x, source.y);
+  }
+
+  updateSoftCreatures(dt) {
+    if (!this.softCreaturesEnabled()) return;
+
+    this.ensureSoftCreatures();
+    this.ensureSoftPlayerCreature();
+
+    if (this.softPrototypeAuthorityEnabled()) {
+      const D = window.DriftCreatures;
+      const world = { food: this.foods, creatures: this.softCreatures };
+
+      for (let i = 0; i < this.softCreatures.length; i++) {
+        const visual = this.softCreatures[i];
+        const source = visual.sourceCreature;
+        if (!source || source.dead) continue;
+
+        // Lab prototype creature drives in-game creature motion/heading.
+        visual.update(dt, world, null);
+
+        const center = D.getBodyCenter(visual.body);
+        const prev = source._softPrevCenter || { x: source.x, y: source.y };
+        const invDt = 1 / Math.max(dt, 0.001);
+        source.vx = (center.x - prev.x) * invDt;
+        source.vy = (center.y - prev.y) * invDt;
+        source.x = center.x;
+        source.y = center.y;
+        source.angle = Math.atan2(visual.facing.y || 0, visual.facing.x || 0) || source.angle || 0;
+        source._softPrevCenter = { x: center.x, y: center.y };
+
+        visual.isLegendary = !!source.legendary;
+        visual.label = source.legendary ? source.name : '';
+        visual.hitFlash = source.hitFlash || 0;
+        visual.growthPulse = source.growthPulse || 0;
+        visual.eatenMark = source.eatenMark || 0;
+
+        const targetScale = Math.max(0.72, source.r / Math.max(1, visual.baseSourceRadius || source.r));
+        if (Math.abs(targetScale - visual.growth.currentScale) > 0.01) {
+          const lerped = visual.growth.currentScale + (targetScale - visual.growth.currentScale) * Math.min(1, dt * 4.2);
+          D.scaleSoftBody(visual.body, lerped / Math.max(0.01, visual.growth.currentScale));
+          visual.growth.currentScale = lerped;
+        }
+      }
+      this.syncSoftPlayerVisual(dt);
+      this._computeSoftActionFlags();
+      return;
+    }
+
+    for (let i = 0; i < this.softCreatures.length; i++) {
+      this.syncSoftCreatureVisual(this.softCreatures[i], dt);
+    }
+    this.syncSoftPlayerVisual(dt);
+    // No post-sync re-pin needed — _swimBodyWave sets node positions kinematically
+    // from source.x/y directly, so body center is already correct.
+
+    // Compute action-range flags so exclamation markers appear in the main game.
+    if (this.player && !this.player.dead && this.softPlayer) {
+      const D = window.DriftCreatures;
+      const pCenter = D.getBodyCenter(this.softPlayer.body);
+      const pSize = this.player.r;
+      const spaceR = pSize * 2.5 + 45;
+      const eR     = pSize * 3.5 + 65;
+      const qR     = pSize * 4.5 + 80;
+      for (let i = 0; i < this.softCreatures.length; i++) {
+        const visual = this.softCreatures[i];
+        if (!visual.sourceCreature || visual.sourceCreature.dead) { visual._actionFlags = null; continue; }
+        const oc   = D.getBodyCenter(visual.body);
+        const dist = Math.hypot(oc.x - pCenter.x, oc.y - pCenter.y);
+        const af = { space: dist < spaceR, e: dist < eR, q: dist < qR };
+        visual._actionFlags = (af.space || af.e || af.q) ? af : null;
+      }
+    } else {
+      for (let i = 0; i < this.softCreatures.length; i++) {
+        this.softCreatures[i]._actionFlags = null;
+      }
+    }
+  }
+
+  _computeSoftActionFlags() {
+    if (!this.player || this.player.dead || !this.softPlayer) {
+      for (let i = 0; i < this.softCreatures.length; i++) {
+        this.softCreatures[i]._actionFlags = null;
+      }
+      return;
+    }
+    const D = window.DriftCreatures;
+    const pCenter = D.getBodyCenter(this.softPlayer.body);
+    const pSize = this.player.r;
+    const spaceR = pSize * 2.5 + 45;
+    const eR     = pSize * 3.5 + 65;
+    const qR     = pSize * 4.5 + 80;
+    for (let i = 0; i < this.softCreatures.length; i++) {
+      const visual = this.softCreatures[i];
+      if (!visual.sourceCreature || visual.sourceCreature.dead) { visual._actionFlags = null; continue; }
+      const oc   = D.getBodyCenter(visual.body);
+      const dist = Math.hypot(oc.x - pCenter.x, oc.y - pCenter.y);
+      const af = { space: dist < spaceR, e: dist < eR, q: dist < qR };
+      visual._actionFlags = (af.space || af.e || af.q) ? af : null;
+    }
+  }
+
+  drawSoftCreatures(ctx, w, h) {
+    if (!this.softCreaturesEnabled()) return;
+
+    const visibleR = this.getRenderRadius() + 260;
+    const visibleSq = visibleR * visibleR;
+    const debug = window.DriftCreatures && window.DriftCreatures.debug;
+    ctx.save();
+    ctx.translate(-this.camX + w * 0.5, -this.camY + h * 0.5);
+    for (let i = 0; i < this.softCreatures.length; i++) {
+      const creature = this.softCreatures[i];
+      const center = window.DriftCreatures.getBodyCenter(creature.body);
+      const dx = center.x - this.camX;
+      const dy = center.y - this.camY;
+      if (dx * dx + dy * dy > visibleSq) continue;
+      creature.render(ctx);
+      if (debug && (debug.creaturePhysics || debug.creatureConstraints || debug.creatureAI || debug.creatureGrowth)) {
+        window.DriftCreatures.renderCreatureDebug(ctx, creature);
+      }
+    }
+    ctx.restore();
   }
 
   generateRockRing(ring) {
@@ -4016,6 +5652,8 @@ class Game {
   startGame() {
     this.rng = rngFromSeed(this.seed);
     this.creatures.length = 0;
+    this.softCreatures.length = 0;
+    this.softCreatureLookup.clear();
     this.foods.length = 0;
     this.partShards.length = 0;
     this.hazards.length = 0;
@@ -4057,45 +5695,36 @@ class Game {
     // seed initial world: food and gentle starting creatures
     for (let i = 0; i < 14; i++) this.director.spawnCreatureNear(this.player, 0);
 
-    // Initial load exception: seed nearby plants so ecology is visible immediately.
-    for (let i = 0; i < 6; i++) {
+    // Seed loose plant chunks so clusters can form organically into PlantStructures.
+    for (let i = 0; i < 22; i++) {
       const a = this.rng() * TAU;
-      const d = 620 + this.rng() * 980;
-      let safe = this.findSafeSpawnPoint(this.player.x + Math.cos(a) * d, this.player.y + Math.sin(a) * d, 140, 12, 14, 520);
-      if (!safe) {
-        safe = this.findSafeSpawnPoint(this.player.x + Math.cos(a) * d, this.player.y + Math.sin(a) * d, 260, 18, 6, 420);
-      }
-      if (safe) {
-        const scale = clamp(this.getOutwardScaleAt(safe.x, safe.y), 1, 10);
-        this.plants.push(new PlantCluster(safe.x, safe.y, this.rng, scale));
-      }
-    }
-    if (this.plants.length < 3) {
-      for (let i = this.plants.length; i < 3; i++) {
-        let placed = false;
-        for (let t = 0; t < 24 && !placed; t++) {
-          const a = this.rng() * TAU;
-          const d = 520 + this.rng() * 780;
-          const px = this.player.x + Math.cos(a) * d;
-          const py = this.player.y + Math.sin(a) * d;
-          if (!this.isInsideRock(px, py, 4) && Math.hypot(px - this.player.x, py - this.player.y) >= 420) {
-            const scale = clamp(this.getOutwardScaleAt(px, py), 1, 10);
-            this.plants.push(new PlantCluster(px, py, this.rng, scale));
-            placed = true;
-          }
-        }
-      }
+      const d = 480 + this.rng() * 1300;
+      const f = this.spawnFood(
+        this.player.x + Math.cos(a) * d, this.player.y + Math.sin(a) * d,
+        'plant', null, 3 + this.rng() * 1.5
+      );
+      if (f) { f.vx = (this.rng() - 0.5) * 14; f.vy = (this.rng() - 0.5) * 14; }
     }
 
-    // Surface at least one of each slow-plant hazard near the start area.
-    for (const type of ['spine_weed', 'curl_weed']) {
+    this.rebuildSoftCreatures();
+
+    // Seed 3 bootstrap PlantStructures so plant ecology is present from the start.
+    for (let i = 0; i < 3; i++) {
       const a = this.rng() * TAU;
-      const d = 360 + this.rng() * 260;
-      const hx = this.player.x + Math.cos(a) * d;
-      const hy = this.player.y + Math.sin(a) * d;
-      const safeH = this.findSafeSpawnPoint(hx, hy, 120, 12, 18, 260);
-      if (safeH) this.hazards.push(new Hazard(safeH.x, safeH.y, type));
+      const d = 700 + this.rng() * 900;
+      const safe = this.findSafeSpawnPoint(
+        this.player.x + Math.cos(a) * d, this.player.y + Math.sin(a) * d, 140, 12, 14, 520
+      );
+      if (safe) {
+        this.plants.push(new PlantStructure(safe.x, safe.y, this.rng,
+          clamp(this.getOutwardScaleAt(safe.x, safe.y), 1, 10)));
+      }
     }
+    // Hazard plants (spine_weed, curl_weed) spawn via the Director naturally — no startup seeding.
+
+    // Action slots: what each action key does (rebindable via action menu)
+    this.actionSlots = { s1: 'bite', s2: 'inspect', s3: 'surge' };
+    this.showingActionMenu = false;
 
     if (!this._loopBound) {
       this._loopBound = (t) => this.loop(t);
@@ -4107,6 +5736,169 @@ class Game {
     this.paused = p;
     this.ui.showPause(p);
     if (!p) this.ui.showPauseSettings(false);
+    // Close action menu when pausing
+    if (p && this.showingActionMenu) this.toggleActionMenu();
+  }
+
+  toggleActionMenu() {
+    this.showingActionMenu = !this.showingActionMenu;
+    const el = document.getElementById('action-menu');
+    if (!el) return;
+    if (this.showingActionMenu) {
+      this.refreshActionMenu();
+      el.classList.add('show');
+    } else {
+      el.classList.remove('show');
+    }
+  }
+
+  refreshActionMenu() {
+    const p = this.player;
+    if (!p) return;
+    // Build available action list based on player's unlocked mutations/parts.
+    const available = [
+      { id: 'bite',    label: 'Bite',     desc: 'Lunge forward for a quick bite attack.', icon: '🦷', always: true },
+      { id: 'inspect', label: 'Inspect',  desc: 'Read out the nearest creature.',         icon: '🔍', always: true },
+      { id: 'surge',   label: 'Surge',    desc: 'Brief speed boost.',                     icon: '⚡', always: true },
+    ];
+    if ((p.mutations || []).some(m => m.icon === 'fang' || m.icon === 'mandibles' || m.icon === 'venom')) {
+      available.push({ id: 'strike', label: 'Strike', desc: 'Weapon attack with enhanced damage.', icon: '⚔️' });
+    }
+    if ((p.mutations || []).some(m => m.icon === 'plates' || m.icon === 'shell')) {
+      available.push({ id: 'shield', label: 'Shield', desc: 'Brace — deflect incoming damage briefly.', icon: '🛡️' });
+    }
+
+    // Render palette
+    const palette = document.getElementById('action-palette');
+    if (palette) {
+      palette.innerHTML = '';
+      for (const a of available) {
+        const card = document.createElement('div');
+        card.className = 'action-card';
+        card.draggable = true;
+        card.dataset.action = a.id;
+        card.title = a.desc;
+        card.innerHTML = `<span class="action-icon">${a.icon}</span><span class="action-label">${a.label}</span>`;
+        card.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', a.id); });
+        card.addEventListener('click', () => {
+          document.querySelectorAll('.action-card').forEach(c => c.classList.remove('selected'));
+          card.classList.add('selected');
+          this._pendingActionBind = a.id;
+        });
+        palette.appendChild(card);
+      }
+    }
+
+    // Update slot display labels
+    const slots = ['s1', 's2', 's3'];
+    for (const slot of slots) {
+      const el = document.getElementById(`slot-${slot}-name`);
+      const keyEl = document.getElementById(`slot-${slot}-key`);
+      if (el) {
+        const actionId = this.actionSlots[slot];
+        const action = available.find(a => a.id === actionId);
+        el.textContent = action ? `${action.icon} ${action.label}` : '—';
+      }
+      if (keyEl) {
+        const actionKey = { s1: 'slot1', s2: 'slot2', s3: 'slot3' }[slot];
+        keyEl.textContent = `[ ${Controls.labelFor(actionKey)} ]`;
+      }
+    }
+
+    // Drop target event listeners
+    document.querySelectorAll('.action-slot-target').forEach(target => {
+      target.ondragover = (e) => { e.preventDefault(); target.classList.add('drag-over'); };
+      target.ondragleave = () => target.classList.remove('drag-over');
+      target.ondrop = (e) => {
+        e.preventDefault();
+        target.classList.remove('drag-over');
+        const actionId = e.dataTransfer.getData('text/plain');
+        const slot = target.dataset.slot;
+        if (actionId && slot && this.actionSlots[slot] !== undefined) {
+          this.actionSlots[slot] = actionId;
+          this.refreshActionMenu();
+        }
+      };
+      target.addEventListener('click', () => {
+        if (this._pendingActionBind) {
+          const slot = target.dataset.slot;
+          if (slot && this.actionSlots[slot] !== undefined) {
+            this.actionSlots[slot] = this._pendingActionBind;
+            this._pendingActionBind = null;
+            document.querySelectorAll('.action-card').forEach(c => c.classList.remove('selected'));
+            this.refreshActionMenu();
+          }
+        }
+      });
+    });
+  }
+
+  triggerActionSlot(slot) {
+    const p = this.player;
+    if (!p || p.dead) return;
+    const action = this.actionSlots[slot];
+    if (!action) return;
+
+    if (action === 'bite') {
+      // Lunge toward nearest enemy in a cone
+      if (p.dashCD <= 0 && p.energy >= T.DASH_ENERGY * 0.6 * (p.stats.dashCostMul || 1)) {
+        const aim = Input.aimDir(this.canvas);
+        p.vx += aim[0] * T.DASH_FORCE * 0.75;
+        p.vy += aim[1] * T.DASH_FORCE * 0.75;
+        p.dashTimer = T.DASH_DURATION * 0.55;
+        p.dashCD = T.DASH_COOLDOWN * 0.8;
+        p.energy -= T.DASH_ENERGY * 0.6 * (p.stats.dashCostMul || 1);
+        p.bumpBiteCD = 0; // allow immediate bite on contact
+        this.particles.burst(p.x, p.y, 8, { speed: 160, life: 0.35, r: 2, h: 8, s: 80, l: 70 });
+        Audio.dash && Audio.dash();
+      }
+    } else if (action === 'inspect') {
+      // Show name and state of nearest creature
+      let nearest = null, nearD2 = Infinity;
+      for (let i = 0; i < this.creatures.length; i++) {
+        const c = this.creatures[i];
+        if (!c || c.dead) continue;
+        const d2 = (c.x - p.x) ** 2 + (c.y - p.y) ** 2;
+        if (d2 < nearD2) { nearD2 = d2; nearest = c; }
+      }
+      if (nearest) {
+        const dist = Math.round(Math.sqrt(nearD2));
+        const state = nearest.state || nearest.behavior || '?';
+        this.ui.toast(`${nearest.name || nearest.kind || 'Creature'} · ${state} · ${dist}u`);
+      } else {
+        this.ui.toast('Nothing nearby.');
+      }
+    } else if (action === 'surge') {
+      // Brief speed boost without full dash cost
+      if (p.energy >= 12) {
+        const m = Math.hypot(p.vx, p.vy) || 1;
+        p.vx = (p.vx / m) * Math.min(p.speed * 2.0, Math.hypot(p.vx, p.vy) + p.speed * 0.8);
+        p.vy = (p.vy / m) * Math.min(p.speed * 2.0, Math.hypot(p.vx, p.vy) + p.speed * 0.8);
+        p.energy -= 12;
+        this.particles.burst(p.x, p.y, 6, { speed: 100, life: 0.28, r: 1.5, h: 190, s: 70, l: 80 });
+      }
+    } else if (action === 'strike') {
+      // Enhanced weapon attack — higher damage lunge
+      if (p.dashCD <= 0 && p.energy >= T.DASH_ENERGY * (p.stats.dashCostMul || 1)) {
+        const aim = Input.aimDir(this.canvas);
+        p.vx += aim[0] * T.DASH_FORCE * 1.1;
+        p.vy += aim[1] * T.DASH_FORCE * 1.1;
+        p.dashTimer = T.DASH_DURATION;
+        p.dashCD = T.DASH_COOLDOWN * 1.2;
+        p.energy -= T.DASH_ENERGY * (p.stats.dashCostMul || 1);
+        p.bumpBiteCD = 0;
+        p._strikeBonus = 1.6; // multiplier applied in next bite collision
+        this.particles.burst(p.x, p.y, 12, { speed: 240, life: 0.45, r: 2.5, h: 0, s: 80, l: 65 });
+        Audio.dash && Audio.dash();
+      }
+    } else if (action === 'shield') {
+      // Brief defense boost
+      if (p.energy >= 10) {
+        p._shieldTimer = Math.max(p._shieldTimer || 0, 1.2);
+        p.energy -= 10;
+        this.particles.burst(p.x, p.y, 10, { speed: 80, life: 0.4, r: 2, h: 220, s: 60, l: 75 });
+      }
+    }
   }
 
   quitToMenu() {
@@ -4137,12 +5929,19 @@ class Game {
     this.lastT = t;
     Input.tick();
     if (Input.pauseEdge && !this.gameOver && !this.mutationActive) this.setPaused(!this.paused);
+    if (Input.actionMenuEdge && !this.gameOver && !this.mutationActive && !this.paused) this.toggleActionMenu();
     if (Input.scrollDelta !== 0) {
       this.zoom = clamp(this.zoom * (1 - Input.scrollDelta * 0.0008), 0.3, 2.5);
       Input.scrollDelta = 0;
     }
     if (this.paused || this.mutationActive || this.milestoneActive) { this.draw(); return; }
     if (this.gameOver) { this.draw(); return; }
+    // Action slot triggers
+    if (!this.showingActionMenu) {
+      if (Input.actionEdge.s1) this.triggerActionSlot('s1');
+      if (Input.actionEdge.s2) this.triggerActionSlot('s2');
+      if (Input.actionEdge.s3) this.triggerActionSlot('s3');
+    }
 
     this.update(dt);
     this.draw();
@@ -4183,12 +5982,41 @@ class Game {
     // creatures
     for (let i = 0; i < this.creatures.length; i++) this.creatures[i].update(dt, this);
 
+    // Creature wake — fast-moving creatures push nearby drifting objects like a speedboat wake.
+    const wakeRadius = 110;
+    const wakeRadSq = wakeRadius * wakeRadius;
+    const wakers = [p, ...this.creatures];
+    for (const mover of wakers) {
+      const spd = Math.hypot(mover.vx, mover.vy);
+      if (spd < 28) continue; // only noticeable at speed
+      const wakeStr = clamp((spd - 28) * 0.012, 0, 0.9);
+      const near = this.grid.query(mover.x, mover.y, wakeRadius, this._scratch);
+      for (let j = 0; j < near.length; j++) {
+        const o = near[j];
+        if (!o || o.kind !== 'food' || o.dead) continue;
+        const odx = o.x - mover.x, ody = o.y - mover.y;
+        const d2 = odx * odx + ody * ody;
+        if (d2 < 4 || d2 > wakeRadSq) continue;
+        const d = Math.sqrt(d2);
+        const falloff = 1 - d / wakeRadius;
+        // Wake is strongest perpendicular to travel direction and slightly behind
+        const nx = odx / d, ny = ody / d;
+        const push = wakeStr * falloff * 22;
+        o.vx += nx * push * dt;
+        o.vy += ny * push * dt;
+      }
+    }
+
     // physical separation to avoid overlap jitter and improve body collisions.
     this.resolveCreatureBodyCollisions();
 
     // foods drift
     for (let i = 0; i < this.foods.length; i++) this.foods[i].update(dt);
-    this.resolvePlantFoodChains(dt);
+    // Plant chunks do not attract or link to each other — they drift freely.
+    // this.resolvePlantFoodChains(dt);
+
+    // soft-creature visual replacement layer, behind feature flag
+    this.updateSoftCreatures(dt);
 
     // part shards drift and collect
     for (let i = 0; i < this.partShards.length; i++) {
@@ -4245,6 +6073,7 @@ class Game {
       }
     }
     this.plants = this.plants.filter(pl => !pl.dead);
+    this.updatePlantLinking(dt);
 
     // hazards
     for (let i = 0; i < this.hazards.length; i++) {
@@ -4266,13 +6095,37 @@ class Game {
     // eggs
     for (const egg of this.eggs) egg.update(dt);
 
-    // rock collision — push all entities (multi-pass to resolve deeper overlaps cleanly)
+    // gentle ambient rock drift + sticking
+    for (const rock of this.rocks) rock.update(dt);
+    this.resolveRockStickCollisions(dt);
+
+    // rock collision — push all entities + plant branch segments (multi-pass)
     for (let pass = 0; pass < 2; pass++) {
       for (const rock of this.rocks) {
         rock.pushOut(p);
         const nearby = this.grid.query(rock.x, rock.y, rock.maxR + 260, this._scratch);
         for (const e of nearby) {
           if (e.kind === 'creature' && !e.dead) rock.pushOut(e);
+        }
+        // Push plant branch segments out of rocks
+        for (const pl of this.plants) {
+          const pdx = pl.x - rock.x, pdy = pl.y - rock.y;
+          if (pdx * pdx + pdy * pdy > (rock.maxR + 200) * (rock.maxR + 200)) continue;
+          for (const branch of pl.branches) {
+            for (const seg of branch.segments) {
+              const sdx = seg.x - rock.x, sdy = seg.y - rock.y;
+              const sd = Math.hypot(sdx, sdy) || 0.001;
+              if (sd > rock.maxR + 8) continue;
+              const surfR = rock._effectiveRadiusForCircle(Math.atan2(sdy, sdx), sd, 6);
+              const ov = surfR + 6 - sd;
+              if (ov > 0) {
+                seg.x += (sdx / sd) * ov;
+                seg.y += (sdy / sd) * ov;
+                seg.vx = seg.vx * 0.5 + rock.vx * 0.5;
+                seg.vy = seg.vy * 0.5 + rock.vy * 0.5;
+              }
+            }
+          }
         }
       }
     }
@@ -4709,7 +6562,7 @@ class Game {
       tipY = hz.y + Math.sin(a) * lf.len;
     }
 
-    const f = this.spawnFood(tipX, tipY, 'plant', biomeAt(Math.hypot(tipX, tipY)), 1.2 + Math.random() * 1.2);
+    const f = this.spawnFood(tipX, tipY, 'plant', biomeAt(Math.hypot(tipX, tipY)), 3 + Math.random() * 1.5);
     if (!f) return;
     const current = this.getCurrentVectorAt(tipX, tipY);
     const spd = 10 + Math.random() * 16;
@@ -4836,6 +6689,116 @@ class Game {
     }
     return false;
   }
+
+  resolveRockStickCollisions(dt) {
+    const rocks = this.rocks;
+    const n = rocks.length;
+    const stick = Math.min(1, dt * 4.2);
+    const spinStick = stick * 0.6;
+    for (let i = 0; i < n; i++) {
+      const a = rocks[i];
+      for (let j = i + 1; j < n; j++) {
+        const b = rocks[j];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const d = Math.hypot(dx, dy);
+        const minD = a.maxR + b.maxR + 4;
+        if (d >= minD || d <= 0.0001) continue;
+        const nx = dx / d;
+        const ny = dy / d;
+        const overlap = minD - d;
+        // Mass-weighted positional split.
+        const ma = a.mass || 1, mb = b.mass || 1;
+        const inv = 1 / (ma + mb);
+        const pushA = overlap * (mb * inv);
+        const pushB = overlap * (ma * inv);
+        a.x -= nx * pushA;
+        a.y -= ny * pushA;
+        b.x += nx * pushB;
+        b.y += ny * pushB;
+        if (a.crevice) { a.crevice.cx -= nx * pushA; a.crevice.cy -= ny * pushA; }
+        if (b.crevice) { b.crevice.cx += nx * pushB; b.crevice.cy += ny * pushB; }
+        // Light restitution on the normal component, then average toward each other (stick).
+        const rvx = b.vx - a.vx;
+        const rvy = b.vy - a.vy;
+        const relN = rvx * nx + rvy * ny;
+        if (relN < 0) {
+          const e = 0.5;
+          const jImp = -(1 + e) * relN / (ma + mb);
+          a.vx -= jImp * mb * nx;
+          a.vy -= jImp * mb * ny;
+          b.vx += jImp * ma * nx;
+          b.vy += jImp * ma * ny;
+        }
+        // Velocity averaging — keeps them snug instead of jittering.
+        const avgVx = (a.vx * ma + b.vx * mb) * inv;
+        const avgVy = (a.vy * ma + b.vy * mb) * inv;
+        a.vx += (avgVx - a.vx) * stick;
+        a.vy += (avgVy - a.vy) * stick;
+        b.vx += (avgVx - b.vx) * stick;
+        b.vy += (avgVy - b.vy) * stick;
+        // Spin averaging.
+        const avgSpin = (a.spin * ma + b.spin * mb) * inv;
+        a.spin += (avgSpin - a.spin) * spinStick;
+        b.spin += (avgSpin - b.spin) * spinStick;
+      }
+    }
+  }
+
+  // ── Plant chunk clustering — 5 close plant-food chunks fuse into a new plant ──
+  _resolvePlantChunkClustering(dt) {
+    if (this.plants.length >= T.PLANT_CAP) return;
+    const foods = this.foods;
+    const radius = PLANT_TUNE.CLUSTER_RADIUS;
+    const required = PLANT_TUNE.CLUSTER_REQUIRED_CHUNKS;
+    const reqTime = PLANT_TUNE.CLUSTER_REQUIRED_TIME;
+    const seen = new Set();
+    for (let i = 0; i < foods.length; i++) {
+      const f = foods[i];
+      if (!f || f.dead || f.type !== 'plant') continue;
+      if (seen.has(f)) continue;
+      if (f._sourceCooldown && f._sourceCooldown > 0) continue;
+      const near = this.grid.query(f.x, f.y, radius, this._scratch);
+      const group = [f];
+      for (let j = 0; j < near.length; j++) {
+        const o = near[j];
+        if (!o || o === f || o.kind !== 'food' || o.dead || o.type !== 'plant') continue;
+        if (o._sourceCooldown && o._sourceCooldown > 0) continue;
+        if (dist2(o.x, o.y, f.x, f.y) <= radius * radius) group.push(o);
+        if (group.length >= required) break;
+      }
+      if (group.length < required) continue;
+      // Track cluster cohesion timer on the seed chunk.
+      f._clusterT = (f._clusterT || 0) + dt;
+      if (f._clusterT < reqTime) {
+        for (const c of group) seen.add(c);
+        continue;
+      }
+      // Fuse — consume chunks, spawn a new PlantStructure at the centroid.
+      let cx = 0, cy = 0;
+      for (const c of group) { cx += c.x; cy += c.y; c.dead = true; }
+      cx /= group.length; cy /= group.length;
+      const scale = clamp(this.getOutwardScaleAt(cx, cy), 1, 10);
+      const plant = new PlantStructure(cx, cy, this.rng, scale);
+      this.plants.push(plant);
+      this.particles.burst(cx, cy, 8, { speed: 60, life: 0.5, r: 1.8, h: plant.hue, s: 70, l: 70 });
+      for (const c of group) seen.add(c);
+    }
+    // Decay cluster timers on chunks that drifted apart.
+    for (let i = 0; i < foods.length; i++) {
+      const f = foods[i];
+      if (!f || f.type !== 'plant' || f.dead) continue;
+      if (f._clusterT && !seen.has(f)) f._clusterT = Math.max(0, f._clusterT - dt * 2);
+    }
+  }
+
+  // Legacy hooks kept as compatibility no-ops — PlantStructure now manages its
+  // own tip-to-tip links and drawing internally.
+  updatePlantLinking(dt) {
+    this._resolvePlantChunkClustering(dt);
+  }
+
+  drawPlantLinks(/* ctx, w, h */) { /* handled inside PlantStructure.draw */ }
 
   findSafeSpawnPoint(x, y, jitter = 120, tries = 10, buffer = 8, minPlayerDistance = 0) {
     let px = x, py = y;
@@ -5352,6 +7315,7 @@ class Game {
 
     // plant clusters (below food)
     for (let i = 0; i < this.plants.length; i++) this.plants[i].draw(ctx, this.camX, this.camY, w, h);
+    this.drawPlantLinks(ctx, w, h);
 
     // foods (under creatures)
     for (let i = 0; i < this.foods.length; i++) this.foods[i].draw(ctx, this.camX, this.camY, w, h);
@@ -5363,10 +7327,14 @@ class Game {
     this.particles.draw(ctx, this.camX, this.camY, w, h);
 
     // creatures
-    for (let i = 0; i < this.creatures.length; i++) this.creatures[i].draw(ctx, this.camX, this.camY, w, h);
+    if (this.softCreaturesEnabled()) this.drawSoftCreatures(ctx, w, h);
+    else for (let i = 0; i < this.creatures.length; i++) this.creatures[i].draw(ctx, this.camX, this.camY, w, h);
 
     // player
-    if (p) p.draw(ctx, this.camX, this.camY, w, h);
+    if (p) {
+      if (this.softCreaturesEnabled() && this.softPlayer) this.drawSoftPlayer(ctx, w, h);
+      else p.draw(ctx, this.camX, this.camY, w, h);
+    }
 
     // eggs (on top of player layer)
     for (const egg of this.eggs) {
@@ -5389,28 +7357,35 @@ class Game {
   }
 
   drawDust(ctx, w, h) {
-    // procedural dust grid with parallax
-    const cell = 120;
+    // Pixel-block dust grid with parallax + storybook color palette
+    const cell = 96;
     const px = -this.camX * 0.4;
     const py = -this.camY * 0.4;
     const startX = Math.floor((-px) / cell) - 1;
     const startY = Math.floor((-py) / cell) - 1;
     const cols = Math.ceil(w / cell) + 3;
     const rows = Math.ceil(h / cell) + 3;
+    const palette = [
+      'rgba(255,244,200,0.55)',
+      'rgba(180,232,255,0.50)',
+      'rgba(255,200,228,0.45)',
+      'rgba(210,255,220,0.50)'
+    ];
     for (let gy = 0; gy < rows; gy++) {
       for (let gx = 0; gx < cols; gx++) {
         const cx = startX + gx;
         const cy = startY + gy;
         const seed = ((cx * 73856093) ^ (cy * 19349663)) >>> 0;
         const r = (seed % 1000) / 1000;
-        if (r < 0.6) continue;
+        if (r < 0.72) continue;
         const ox = ((seed >> 3) % 1000) / 1000 * cell;
         const oy = ((seed >> 11) % 1000) / 1000 * cell;
-        const sx = px + cx * cell + ox;
-        const sy = py + cy * cell + oy;
-        if (sx < -5 || sy < -5 || sx > w + 5 || sy > h + 5) continue;
-        const size = ((seed >> 17) % 100) / 100 * 1.4 + 0.3;
-        ctx.fillStyle = hslaCSS(200, 30, 80, 0.15 + 0.18 * r);
+        const sx = Math.round(px + cx * cell + ox);
+        const sy = Math.round(py + cy * cell + oy);
+        if (sx < -6 || sy < -6 || sx > w + 6 || sy > h + 6) continue;
+        ctx.fillStyle = palette[(seed >> 7) % palette.length];
+        const big = (seed >> 19) & 1;
+        const size = big ? 3 : 2;
         ctx.fillRect(sx, sy, size, size);
       }
     }

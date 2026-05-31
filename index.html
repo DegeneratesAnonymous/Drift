@@ -5,759 +5,436 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Drift — A Micro-Ecosystem</title>
 <style>
+  /* ── Deep-sea bioluminescent minimalist UI ─────────────────────────────── */
   :root {
-    --hud-fg: #d8f1ff;
-    --hud-dim: #6c8aa0;
-    --hud-warn: #ff6a6a;
-    --hud-good: #5dffb1;
-    --hud-energy: #ffd76a;
-    --hud-bg: rgba(6, 14, 22, 0.55);
-    --hud-line: rgba(120, 200, 255, 0.18);
+    --fg: #cfe6f2;
+    --dim: #5d7888;
+    --faint: #3a505d;
+    --warn: #ff7a7a;
+    --good: #6fe7c6;
+    --accent: #5fd6ff;
+    --accent-soft: rgba(95, 214, 255, 0.5);
+    --panel: rgba(5, 11, 17, 0.62);
+    --panel-solid: rgba(5, 11, 17, 0.92);
+    --line: rgba(150, 220, 255, 0.10);
+    --line-strong: rgba(150, 220, 255, 0.22);
+    --blur: blur(12px);
+    --bar-bg: rgba(150, 210, 240, 0.06);
     --font-stack: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --r: 4px;
   }
 
   html, body {
-    margin: 0;
-    padding: 0;
-    width: 100%;
-    height: 100%;
-    background: #04080d;
-    color: var(--hud-fg);
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #02060a;
+    color: var(--fg);
     font-family: var(--font-stack);
+    font-weight: 400;
     overflow: hidden;
-    user-select: none;
-    -webkit-user-select: none;
+    user-select: none; -webkit-user-select: none;
+    -webkit-font-smoothing: antialiased;
   }
 
   #game-root {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    overflow: hidden;
-    background: radial-gradient(ellipse at center, #0b1a2a 0%, #03070d 70%);
+    position: relative; width: 100%; height: 100%; overflow: hidden;
+    background: radial-gradient(ellipse at 50% 42%, #08151f 0%, #03080e 62%, #010407 100%);
     touch-action: none;
   }
-
-  #game-root.embed {
-    border-radius: 8px;
-    box-shadow: 0 0 0 1px rgba(120, 200, 255, 0.12) inset;
-  }
+  #game-root.embed { border-radius: 8px; box-shadow: 0 0 0 1px var(--line) inset; }
 
   #game-canvas {
-    display: block;
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    cursor: crosshair;
-    touch-action: none;
+    display: block; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    cursor: crosshair; touch-action: none;
   }
 
-  #mobile-controls {
-    display: none;
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    z-index: 7;
-  }
-
+  /* ── Mobile controls ──────────────────────────────────────────────────── */
+  #mobile-controls { display: none; position: absolute; inset: 0; pointer-events: none; z-index: 7; }
   .stick-zone {
-    position: absolute;
-    left: 16px;
-    bottom: 18px;
-    width: 144px;
-    height: 144px;
-    border-radius: 50%;
-    pointer-events: auto;
-    touch-action: none;
-    background: radial-gradient(circle at 50% 50%, rgba(140,220,255,0.18), rgba(30,50,70,0.28));
-    border: 1px solid rgba(150,220,255,0.28);
-    box-shadow: 0 0 24px rgba(30,70,120,0.28) inset;
+    position: absolute; left: 16px; bottom: 18px; width: 144px; height: 144px;
+    border-radius: 50%; pointer-events: auto; touch-action: none;
+    background: radial-gradient(circle at 50% 50%, rgba(95,214,255,0.08), rgba(5,12,18,0.35));
+    border: 1px solid var(--line);
   }
-
   .stick-knob {
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    width: 62px;
-    height: 62px;
-    transform: translate(-50%, -50%);
-    border-radius: 50%;
-    background: linear-gradient(180deg, rgba(180,235,255,0.65), rgba(90,165,210,0.5));
-    border: 1px solid rgba(230,250,255,0.5);
-    box-shadow: 0 2px 14px rgba(10,20,40,0.45);
+    position: absolute; left: 50%; top: 50%; width: 60px; height: 60px;
+    transform: translate(-50%, -50%); border-radius: 50%;
+    background: rgba(95,214,255,0.16);
+    border: 1px solid var(--accent-soft);
   }
-
   .mob-btn {
-    position: absolute;
-    pointer-events: auto;
-    touch-action: manipulation;
-    width: 78px;
-    height: 78px;
-    border-radius: 50%;
-    border: 1px solid rgba(150,220,255,0.36);
-    color: var(--hud-fg);
-    font-size: 11px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
+    position: absolute; pointer-events: auto; touch-action: manipulation;
+    width: 76px; height: 76px; border-radius: 50%;
+    border: 1px solid var(--line-strong); color: var(--fg);
+    font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
     font-family: var(--font-stack);
-    background: radial-gradient(circle at 30% 30%, rgba(130,200,255,0.38), rgba(18,34,52,0.8));
-    box-shadow: 0 2px 16px rgba(0,0,0,0.45);
+    background: rgba(7,16,24,0.55); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
   }
+  .mob-btn:active { transform: scale(0.95); border-color: var(--accent-soft); color: var(--accent); }
+  #mob-dash { right: 18px; bottom: 90px; width: 90px; height: 90px; }
+  #mob-pause { right: 96px; bottom: 16px; width: 62px; height: 62px; }
 
-  .mob-btn:active {
-    transform: scale(0.96);
-    background: radial-gradient(circle at 30% 30%, rgba(170,230,255,0.46), rgba(25,48,70,0.92));
-  }
-
-  #mob-dash {
-    right: 18px;
-    bottom: 90px;
-    width: 92px;
-    height: 92px;
-  }
-
-  #mob-pause {
-    right: 96px;
-    bottom: 16px;
-    width: 64px;
-    height: 64px;
-    font-size: 10px;
-  }
-
+  /* ── HUD panels ───────────────────────────────────────────────────────── */
   .hud {
-    position: absolute;
-    pointer-events: none;
-    color: var(--hud-fg);
-    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
-    font-size: 12px;
-    letter-spacing: 0.04em;
+    position: absolute; pointer-events: none; color: var(--fg);
+    font-size: 12px; letter-spacing: 0.04em;
+  }
+  .panel {
+    background: var(--panel);
+    backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
   }
 
   #hud-stats {
-    top: 14px;
-    left: 14px;
-    background: var(--hud-bg);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
-    border: 1px solid var(--hud-line);
-    border-radius: 6px;
-    padding: 10px 12px;
-    min-width: 180px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
+    top: 18px; left: 18px; padding: 14px 16px; min-width: 188px;
+    display: flex; flex-direction: column; gap: 9px;
+    background: var(--panel); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+    border: 1px solid var(--line); border-radius: var(--r);
   }
-
-  .stat-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
+  .stat-row { display: flex; align-items: center; gap: 10px; }
   .stat-label {
-    width: 56px;
-    color: var(--hud-dim);
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
+    width: 48px; color: var(--dim); font-size: 9px;
+    text-transform: uppercase; letter-spacing: 0.16em;
   }
-
   .bar-track {
-    flex: 1;
-    height: 6px;
-    background: rgba(255,255,255,0.07);
-    border-radius: 3px;
-    overflow: hidden;
-    position: relative;
+    flex: 1; height: 3px; background: var(--bar-bg);
+    border-radius: 2px; overflow: hidden; position: relative;
   }
-
   .bar-fill {
-    height: 100%;
-    width: 100%;
-    border-radius: 3px;
-    transition: width 0.15s linear, background 0.3s;
+    height: 100%; width: 100%; border-radius: 2px;
+    transition: width 0.25s cubic-bezier(0.4,0,0.2,1), background 0.3s;
   }
-
-  .bar-health .bar-fill { background: linear-gradient(90deg, #ff5a5a, #ff9090); }
-  .bar-energy .bar-fill { background: linear-gradient(90deg, #ffb84d, #ffe278); }
-  .bar-size   .bar-fill { background: linear-gradient(90deg, #5dffb1, #9affd9); }
-
+  /* desaturated, unified palette — accent reserved for emphasis */
+  .bar-health .bar-fill { background: #e8716f; }
+  .bar-energy .bar-fill { background: #d9b066; }
+  .bar-mut    .bar-fill { background: #9c8cff; }
+  .bar-size   .bar-fill { background: var(--good); }
   .stat-value {
-    width: 32px;
-    text-align: right;
-    color: var(--hud-fg);
-    font-variant-numeric: tabular-nums;
-    font-size: 11px;
+    width: 30px; text-align: right; color: var(--fg);
+    font-variant-numeric: tabular-nums; font-size: 11px; opacity: 0.92;
   }
 
   #hud-biome {
-    top: 110px;
-    left: 14px;
-    text-align: left;
-    background: var(--hud-bg);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
-    border: 1px solid var(--hud-line);
-    border-radius: 6px;
-    padding: 8px 14px;
-    min-width: 160px;
+    top: 132px; left: 18px; text-align: left; padding: 11px 16px; min-width: 160px;
+    background: var(--panel); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+    border: 1px solid var(--line); border-radius: var(--r);
   }
-
-  #biome-name {
-    font-size: 13px;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-    color: var(--hud-fg);
-  }
-
-  #biome-tier {
-    font-size: 10px;
-    letter-spacing: 0.18em;
-    color: var(--hud-dim);
-    margin-top: 2px;
-  }
+  #biome-name { font-size: 12px; letter-spacing: 0.26em; text-transform: uppercase; color: var(--fg); }
+  #biome-tier { font-size: 9px; letter-spacing: 0.22em; color: var(--dim); margin-top: 4px; }
 
   #hud-goals {
-    top: 14px;
-    right: 14px;
-    background: var(--hud-bg);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
-    border: 1px solid var(--hud-line);
-    border-radius: 6px;
-    padding: 10px 12px;
-    min-width: 220px;
-    max-width: 280px;
+    top: 18px; right: 18px; padding: 14px 16px; min-width: 216px; max-width: 280px;
+    background: var(--panel); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+    border: 1px solid var(--line); border-radius: var(--r);
   }
-
   .goal-title {
-    font-size: 10px;
-    letter-spacing: 0.18em;
-    color: var(--hud-dim);
-    text-transform: uppercase;
-    margin-bottom: 8px;
+    font-size: 9px; letter-spacing: 0.22em; color: var(--dim);
+    text-transform: uppercase; margin-bottom: 11px;
   }
-
-  .goal-item {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    margin-bottom: 8px;
-  }
-
+  .goal-item { display: flex; flex-direction: column; gap: 5px; margin-bottom: 11px; }
   .goal-item:last-child { margin-bottom: 0; }
-
-  .goal-text {
-    font-size: 12px;
-    color: var(--hud-fg);
-  }
-
-  .goal-bar-track {
-    height: 3px;
-    background: rgba(255,255,255,0.07);
-    border-radius: 2px;
-    overflow: hidden;
-  }
-
-  .goal-bar-fill {
-    height: 100%;
-    background: linear-gradient(90deg, #6ad9ff, #b7ecff);
-    border-radius: 2px;
-    transition: width 0.3s;
-  }
-
-  .goal-item.done .goal-text {
-    color: var(--hud-good);
-    text-decoration: line-through;
-    opacity: 0.6;
-  }
+  .goal-text { font-size: 12px; color: var(--fg); opacity: 0.92; }
+  .goal-bar-track { height: 2px; background: var(--bar-bg); border-radius: 1px; overflow: hidden; }
+  .goal-bar-fill { height: 100%; background: var(--accent); border-radius: 1px; transition: width 0.4s cubic-bezier(0.4,0,0.2,1); }
+  .goal-item.done .goal-text { color: var(--good); opacity: 0.5; }
 
   #hud-warn {
-    bottom: 24%;
-    left: 50%;
-    transform: translateX(-50%);
-    font-size: 13px;
-    letter-spacing: 0.3em;
-    color: var(--hud-warn);
-    text-transform: uppercase;
-    opacity: 0;
-    transition: opacity 0.2s;
-    text-shadow: 0 0 16px rgba(255, 100, 100, 0.7);
+    bottom: 22%; left: 50%; transform: translateX(-50%);
+    font-size: 11px; letter-spacing: 0.4em; color: var(--warn); text-transform: uppercase;
+    opacity: 0; transition: opacity 0.3s;
   }
-
-  #hud-warn.show {
-    opacity: 1;
-    animation: pulse 1s infinite;
-  }
-
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
-  }
+  #hud-warn.show { opacity: 0.92; animation: warnPulse 1.6s ease-in-out infinite; }
+  @keyframes warnPulse { 0%,100% { opacity: 0.9; } 50% { opacity: 0.35; } }
 
   #hud-event {
-    top: 112px;
-    left: 50%;
-    transform: translateX(-50%);
-    background: var(--hud-bg);
-    border: 1px solid rgba(255, 200, 120, 0.4);
-    border-radius: 6px;
-    padding: 10px 20px;
-    text-align: center;
-    color: #ffe9b8;
-    opacity: 0;
-    transition: opacity 0.5s;
-    min-width: 280px;
-    max-width: min(80vw, 720px);
-    box-shadow: 0 0 30px rgba(255, 180, 80, 0.15);
-    z-index: 4;
+    top: 124px; left: 50%; transform: translateX(-50%) translateY(-6px);
+    padding: 12px 24px; text-align: center; color: var(--fg);
+    opacity: 0; transition: opacity 0.5s, transform 0.5s;
+    min-width: 260px; max-width: min(80vw, 680px); z-index: 4;
+    background: var(--panel); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+    border: 1px solid var(--line); border-left: 2px solid var(--accent-soft); border-radius: var(--r);
+  }
+  #hud-event.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #event-title { font-size: 11px; letter-spacing: 0.26em; text-transform: uppercase; margin-bottom: 6px; color: var(--accent); }
+  #event-desc { font-size: 11px; color: var(--dim); letter-spacing: 0.04em; line-height: 1.5; }
+
+  #hud-controls { bottom: 16px; left: 18px; font-size: 9px; color: var(--faint); letter-spacing: 0.14em; line-height: 1.9; }
+  #hud-controls kbd, .controls-hint kbd {
+    display: inline-block; padding: 2px 6px; border: 1px solid var(--line);
+    border-radius: 3px; background: rgba(150,210,240,0.04); color: var(--dim);
+    font-family: var(--font-stack); font-size: 9px; margin: 0 1px;
   }
 
-  #hud-event.show { opacity: 1; }
-
-  #event-title {
-    font-size: 13px;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-    margin-bottom: 4px;
-  }
-
-  #event-desc {
-    font-size: 11px;
-    color: var(--hud-dim);
-    letter-spacing: 0.04em;
-  }
-
-  #hud-controls {
-    bottom: 14px;
-    left: 14px;
-    font-size: 10px;
-    color: var(--hud-dim);
-    letter-spacing: 0.1em;
-    line-height: 1.6;
-  }
-
-  #hud-controls kbd {
-    display: inline-block;
-    padding: 1px 5px;
-    border: 1px solid var(--hud-line);
-    border-radius: 3px;
-    background: rgba(20, 30, 45, 0.6);
-    color: var(--hud-fg);
-    font-family: var(--font-stack);
-    font-size: 9px;
-    margin: 0 1px;
-  }
-
-  #hud-meta {
-    bottom: 14px;
-    right: 14px;
-    font-size: 10px;
-    color: var(--hud-dim);
-    text-align: right;
-    letter-spacing: 0.06em;
-  }
-
-  #hud-meta .meta-row { margin-bottom: 2px; }
-  #hud-meta .meta-row b { color: var(--hud-fg); font-weight: normal; }
+  #hud-meta { bottom: 16px; right: 18px; font-size: 9px; color: var(--faint); text-align: right; letter-spacing: 0.12em; line-height: 1.7; }
+  #hud-meta .meta-row b { color: var(--dim); font-weight: 400; }
 
   #hud-codex {
-    left: 14px;
-    bottom: 62px;
-    background: var(--hud-bg);
-    border: 1px solid var(--hud-line);
-    border-radius: 6px;
-    padding: 8px 10px;
-    min-width: 220px;
-    max-width: 300px;
-    color: var(--hud-dim);
+    left: 18px; bottom: 66px; padding: 11px 14px; min-width: 216px; max-width: 300px; color: var(--dim);
+    background: var(--panel); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+    border: 1px solid var(--line); border-radius: var(--r);
   }
-  #hud-codex .codex-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    margin-bottom: 6px;
-  }
-  #hud-codex .codex-body {
-    display: block;
-  }
-  #hud-codex.collapsed .codex-body {
-    display: none;
-  }
+  #hud-codex .codex-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  #hud-codex.collapsed .codex-body { display: none; }
+  #hud-codex .codex-body { margin-top: 9px; }
   #codex-toggle {
-    border: 1px solid var(--hud-line);
-    border-radius: 4px;
-    background: rgba(12, 24, 38, 0.7);
-    color: var(--hud-dim);
-    font-size: 9px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    padding: 3px 8px;
-    cursor: pointer;
-    font-family: var(--font-stack);
+    border: 1px solid var(--line); border-radius: 3px; background: transparent;
+    color: var(--dim); font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
+    padding: 3px 9px; cursor: pointer; font-family: var(--font-stack); transition: color 0.15s, border-color 0.15s;
   }
-  #codex-toggle:hover { color: var(--hud-fg); }
-  #hud-codex .codex-list {
-    margin-top: 6px;
-    font-size: 10px;
-    line-height: 1.35;
-    max-height: 90px;
-    overflow: auto;
-    color: var(--hud-fg);
-    opacity: 0.9;
-  }
-  #hud-codex .codex-count {
-    color: var(--hud-fg);
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    margin-bottom: 4px;
-  }
-  #hud-codex .codex-recent {
-    font-size: 10px;
-    line-height: 1.3;
-    max-height: 30px;
-    overflow: hidden;
-  }
+  #codex-toggle:hover { color: var(--accent); border-color: var(--accent-soft); }
+  #hud-codex .codex-list { margin-top: 7px; font-size: 10px; line-height: 1.5; max-height: 90px; overflow: auto; color: var(--fg); opacity: 0.8; }
+  #hud-codex .codex-count { color: var(--fg); font-size: 11px; letter-spacing: 0.08em; margin-bottom: 4px; opacity: 0.9; }
+  #hud-codex .codex-recent { font-size: 10px; line-height: 1.4; max-height: 30px; overflow: hidden; }
 
-  /* Overlays */
+  /* ── Overlays / modals ────────────────────────────────────────────────── */
   .overlay {
-    position: absolute;
-    inset: 0;
-    background: rgba(2, 6, 12, 0.75);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
-    display: none;
-    align-items: center;
-    justify-content: center;
-    z-index: 10;
-    pointer-events: auto;
+    position: absolute; inset: 0;
+    background: rgba(1, 4, 8, 0.7);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    display: none; align-items: center; justify-content: center; z-index: 10; pointer-events: auto;
+    animation: fadeIn 0.35s ease;
   }
   .overlay.show { display: flex; }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+  #dev-tools { z-index: 14; }
 
   .modal {
-    background: linear-gradient(180deg, rgba(14, 24, 38, 0.95), rgba(8, 14, 22, 0.95));
-    border: 1px solid rgba(120, 200, 255, 0.2);
-    border-radius: 10px;
-    padding: 28px 32px;
-    max-width: 760px;
-    width: calc(100% - 40px);
-    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), 0 0 80px rgba(80, 160, 255, 0.06) inset;
-    color: var(--hud-fg);
+    background: var(--panel-solid);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 40px 44px;
+    max-width: 760px; width: calc(100% - 48px);
+    box-shadow: 0 40px 120px rgba(0,0,0,0.55);
+    color: var(--fg);
+    animation: rise 0.4s cubic-bezier(0.2,0.7,0.2,1);
   }
+  @keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
 
   .modal-title {
-    font-size: 14px;
-    letter-spacing: 0.3em;
-    text-transform: uppercase;
-    color: var(--hud-dim);
-    text-align: center;
-    margin-bottom: 6px;
+    font-size: 10px; letter-spacing: 0.42em; text-transform: uppercase;
+    color: var(--dim); text-align: center; margin-bottom: 10px;
   }
-
   .modal-subtitle {
-    font-size: 22px;
-    text-align: center;
-    margin-bottom: 24px;
-    letter-spacing: 0.04em;
+    font-size: 24px; font-weight: 300; text-align: center;
+    margin-bottom: 32px; letter-spacing: 0.04em; color: var(--fg);
   }
 
-  .mutation-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 14px;
-  }
-
+  .mutation-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
   .mutation-card {
-    background: rgba(20, 32, 48, 0.55);
-    border: 1px solid rgba(120, 200, 255, 0.18);
-    border-radius: 8px;
-    padding: 18px 16px;
-    cursor: pointer;
-    transition: transform 0.15s, border-color 0.15s, background 0.15s;
-    text-align: center;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
+    background: rgba(150,210,240,0.02);
+    border: 1px solid var(--line);
+    border-radius: 5px; padding: 22px 16px; cursor: pointer;
+    transition: border-color 0.2s, background 0.2s, transform 0.2s;
+    text-align: center; display: flex; flex-direction: column; align-items: center; gap: 12px;
   }
-
   .mutation-card:hover {
-    transform: translateY(-3px);
-    border-color: rgba(150, 220, 255, 0.5);
-    background: rgba(30, 50, 70, 0.7);
+    transform: translateY(-2px);
+    border-color: var(--accent-soft);
+    background: rgba(95,214,255,0.05);
   }
-
-  .mutation-icon {
-    width: 60px;
-    height: 60px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .mutation-name {
-    font-size: 14px;
-    letter-spacing: 0.08em;
-    color: var(--hud-fg);
-  }
-
-  .mutation-benefit {
-    font-size: 11px;
-    color: var(--hud-good);
-    line-height: 1.4;
-  }
-
-  .mutation-cost {
-    font-size: 11px;
-    color: #ff9090;
-    line-height: 1.4;
-  }
-
-  .mutation-flavor {
-    font-size: 10px;
-    color: var(--hud-dim);
-    font-style: italic;
-    line-height: 1.4;
-    margin-top: 2px;
-  }
+  .mutation-icon { width: 56px; height: 56px; display: flex; align-items: center; justify-content: center; opacity: 0.9; }
+  .mutation-name { font-size: 13px; letter-spacing: 0.1em; color: var(--fg); }
+  .mutation-benefit { font-size: 11px; color: var(--good); line-height: 1.5; }
+  .mutation-cost { font-size: 11px; color: var(--warn); line-height: 1.5; opacity: 0.85; }
+  .mutation-flavor { font-size: 10px; color: var(--faint); font-style: italic; line-height: 1.5; margin-top: 2px; }
 
   /* Game over */
-  #game-over .modal { max-width: 520px; text-align: center; }
-  .summary-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px 18px;
-    margin: 16px 0 24px;
-    font-size: 12px;
-  }
-  .summary-grid .label { color: var(--hud-dim); text-align: right; letter-spacing: 0.06em; }
-  .summary-grid .value { color: var(--hud-fg); text-align: left; font-variant-numeric: tabular-nums; }
+  #game-over .modal { max-width: 460px; text-align: center; }
+  .summary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 20px; margin: 20px 0 30px; font-size: 12px; }
+  .summary-grid .label { color: var(--dim); text-align: right; letter-spacing: 0.08em; text-transform: uppercase; font-size: 10px; }
+  .summary-grid .value { color: var(--fg); text-align: left; font-variant-numeric: tabular-nums; }
 
   .btn {
-    background: linear-gradient(180deg, #2a4a6a, #1a3050);
-    border: 1px solid rgba(120, 200, 255, 0.3);
-    color: var(--hud-fg);
-    padding: 10px 22px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 12px;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
+    background: transparent;
+    border: 1px solid var(--line-strong);
+    color: var(--fg);
+    padding: 12px 26px; border-radius: var(--r); cursor: pointer;
+    font-size: 11px; letter-spacing: 0.22em; text-transform: uppercase;
     font-family: var(--font-stack);
-    transition: background 0.15s, transform 0.1s;
+    transition: border-color 0.2s, color 0.2s, background 0.2s;
   }
-  .btn:hover { background: linear-gradient(180deg, #3a5e84, #234166); }
+  .btn:hover { border-color: var(--accent); color: var(--accent); background: rgba(95,214,255,0.05); }
   .btn:active { transform: translateY(1px); }
 
   /* Intro */
   #intro .modal { max-width: 580px; text-align: center; }
-  #intro p { color: var(--hud-dim); font-size: 13px; line-height: 1.6; margin: 12px 0; }
-  #intro .controls-hint {
-    margin: 22px 0;
-    font-size: 11px;
-    letter-spacing: 0.14em;
-    color: var(--hud-dim);
-  }
-  #intro .controls-hint kbd {
-    display: inline-block;
-    padding: 2px 7px;
-    border: 1px solid var(--hud-line);
-    border-radius: 3px;
-    background: rgba(20, 30, 45, 0.6);
-    color: var(--hud-fg);
-    font-size: 11px;
-    margin: 0 2px;
-  }
-  .seed-row {
-    display: flex;
-    gap: 8px;
-    justify-content: center;
-    align-items: center;
-    margin: 18px 0;
-    font-size: 11px;
-    color: var(--hud-dim);
-    letter-spacing: 0.1em;
-  }
+  #intro p { color: var(--dim); font-size: 13px; line-height: 1.7; margin: 14px 0; }
+  #intro .controls-hint { margin: 26px 0; font-size: 10px; letter-spacing: 0.16em; color: var(--faint); line-height: 1.8; }
+  .seed-row { display: flex; gap: 10px; justify-content: center; align-items: center; margin: 22px 0; font-size: 10px; color: var(--dim); letter-spacing: 0.16em; }
   .seed-row input {
-    background: rgba(10, 20, 32, 0.7);
-    border: 1px solid var(--hud-line);
-    color: var(--hud-fg);
-    padding: 6px 10px;
-    border-radius: 4px;
-    font-family: var(--font-stack);
-    font-size: 12px;
-    letter-spacing: 0.08em;
-    width: 160px;
-    text-align: center;
+    background: rgba(150,210,240,0.03); border: 1px solid var(--line); color: var(--fg);
+    padding: 8px 12px; border-radius: var(--r); font-family: var(--font-stack);
+    font-size: 12px; letter-spacing: 0.1em; width: 160px; text-align: center;
+    transition: border-color 0.2s;
   }
-  .seed-row input:focus { outline: 1px solid rgba(120, 200, 255, 0.4); }
+  .seed-row input:focus { outline: none; border-color: var(--accent-soft); }
 
   .toast {
-    position: absolute;
-    top: 68px;
-    left: 50%;
-    transform: translate(-50%, -8px);
-    background: var(--hud-bg);
-    border: 1px solid var(--hud-line);
-    border-radius: 6px;
-    padding: 10px 16px;
-    font-size: 12px;
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
-    color: var(--hud-fg);
-    opacity: 0;
-    transition: opacity 0.4s, transform 0.4s;
-    pointer-events: none;
+    position: absolute; top: 72px; left: 50%; transform: translate(-50%, -8px);
+    padding: 10px 18px; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--fg);
+    opacity: 0; transition: opacity 0.45s, transform 0.45s; pointer-events: none;
+    background: var(--panel); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+    border: 1px solid var(--line); border-radius: var(--r);
   }
-  .toast.show {
-    opacity: 1;
-    transform: translate(-50%, 0);
-  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
-  /* Embed mode tweaks */
+  /* Embed mode */
   body.embed #hud-controls { display: none; }
   body.embed #intro p { font-size: 12px; }
 
   /* Creature creator */
-  .creator-grid {
+  .creator-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 24px; margin-bottom: 6px; max-width: 560px; margin-left: auto; margin-right: auto; }
+  .creator-block { display: flex; flex-direction: column; gap: 8px; align-items: center; text-align: center; }
+  .creator-label { font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase; color: var(--dim); }
+  .creator-sublabel { font-size: 10px; color: var(--faint); font-style: italic; min-height: 14px; letter-spacing: 0.04em; line-height: 1.4; }
+  .creator-row { display: flex; flex-wrap: wrap; gap: 7px; justify-content: center; }
+  .creator-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 8px; }
+  .creator-mini-btn {
+    padding: 6px 12px; border: 1px solid var(--line); border-radius: var(--r);
+    font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--dim);
+    cursor: pointer; background: transparent; font-family: var(--font-stack); transition: color 0.18s, border-color 0.18s;
+  }
+  .creator-mini-btn:hover { color: var(--accent); border-color: var(--accent-soft); }
+  .pause-stack { display: grid; gap: 10px; margin-top: 10px; }
+  #pause-settings-panel {
+    margin-top: 10px; padding: 12px; border: 1px solid var(--line); border-radius: var(--r);
+    background: rgba(150,210,240,0.02); text-align: left; display: none;
+  }
+  .pause-setting-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 11px; letter-spacing: 0.08em; color: var(--dim); }
+  /* Controls rebinding panel */
+  #controls-rebind-panel { margin-top: 8px; display: none; }
+  .rebind-row {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 6px; font-size: 10px; letter-spacing: 0.06em; color: var(--dim);
+  }
+  .rebind-row span { flex: 1; }
+  .bind-btn {
+    font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent);
+    border: 1px solid var(--line); border-radius: 3px; padding: 2px 7px; background: transparent;
+    cursor: pointer; font-family: var(--font-stack); min-width: 44px; text-align: center; transition: border-color 0.15s, background 0.15s;
+  }
+  .bind-btn:hover { border-color: var(--accent); }
+  .bind-btn.listening { border-color: var(--accent); background: rgba(150,210,245,0.12); color: #fff; }
+  .rebind-section-title { font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent-soft); margin: 10px 0 4px; opacity: 0.7; }
+  /* Action menu overlay */
+  #action-menu .modal { max-width: 480px; }
+  .action-slots-grid { display: flex; gap: 10px; justify-content: center; margin: 12px 0; flex-wrap: wrap; }
+  .action-slot-col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .action-slot-key { font-size: 9px; letter-spacing: 0.12em; color: var(--dim); text-transform: uppercase; }
+  .action-slot-target {
+    width: 80px; height: 56px; border: 1px dashed var(--line); border-radius: var(--r);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-size: 11px; color: var(--accent-soft); cursor: pointer; transition: border-color 0.15s, background 0.15s;
+    gap: 2px;
+  }
+  .action-slot-target:hover, .action-slot-target.drag-over { border-color: var(--accent); background: rgba(150,210,245,0.07); }
+  .action-palette-label { font-size: 9px; letter-spacing: 0.12em; color: var(--dim); text-transform: uppercase; margin: 8px 0 6px; opacity: 0.7; }
+  #action-palette { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-bottom: 12px; }
+  .action-card {
+    width: 68px; height: 56px; border: 1px solid var(--line); border-radius: var(--r);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    cursor: grab; transition: border-color 0.15s, background 0.15s; gap: 2px;
+    user-select: none;
+  }
+  .action-card:hover { border-color: var(--accent-soft); background: rgba(150,210,245,0.04); }
+  .action-card.selected { border-color: var(--accent); background: rgba(150,210,245,0.1); }
+  .action-icon { font-size: 18px; line-height: 1; }
+  .action-label { font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); }
+  .action-hint { font-size: 9px; color: var(--dim); margin: 4px 0 10px; opacity: 0.6; }
+  #dev-tools-panel {
+    max-width: 820px;
+    width: calc(100% - 48px);
+    text-align: left;
+  }
+  .dev-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 14px 20px;
-    margin-bottom: 6px;
-    max-width: 560px;
-    margin-left: auto;
-    margin-right: auto;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px 18px;
+    margin-top: 16px;
   }
-  .creator-block {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    align-items: center;
-    text-align: center;
+  .dev-block {
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    background: rgba(150,210,240,0.03);
   }
-  .creator-label {
-    font-size: 10px;
-    letter-spacing: 0.18em;
+  .dev-block h4 {
+    margin: 0 0 10px 0;
+    font-size: 9px;
+    letter-spacing: 0.2em;
     text-transform: uppercase;
-    color: var(--hud-dim);
+    color: var(--dim);
+    font-weight: 400;
   }
-  .creator-sublabel {
-    font-size: 10px;
-    color: var(--hud-dim);
-    font-style: italic;
-    min-height: 14px;
+  .dev-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 10px;
+    font-size: 11px;
+    color: var(--fg);
+  }
+  .dev-row small {
+    display: block;
+    color: var(--faint);
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    margin-top: 3px;
+  }
+  .dev-row input[type="range"] {
+    grid-column: 1 / -1;
+    width: 100%;
+    margin: 2px 0 0;
+    accent-color: var(--accent);
+  }
+  .dev-readout {
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
     letter-spacing: 0.04em;
-    text-align: center;
+    white-space: nowrap;
   }
-  .creator-row { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
-  .creator-actions {
+  .dev-actions {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    justify-content: center;
-    margin-top: 6px;
+    margin-top: 10px;
   }
-  .creator-mini-btn {
-    padding: 5px 10px;
-    border: 1px solid var(--hud-line);
-    border-radius: 4px;
+  .dev-note {
+    margin-top: 12px;
     font-size: 10px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--hud-dim);
-    cursor: pointer;
-    background: rgba(12, 24, 38, 0.6);
-    font-family: var(--font-stack);
+    line-height: 1.5;
+    color: var(--faint);
+    letter-spacing: 0.04em;
   }
-  .creator-mini-btn:hover { color: var(--hud-fg); border-color: rgba(120,200,255,0.35); }
-  .pause-stack {
-    display: grid;
-    gap: 8px;
-    margin-top: 8px;
-  }
-  #pause-settings-panel {
-    margin-top: 8px;
-    padding: 10px;
-    border: 1px solid var(--hud-line);
-    border-radius: 6px;
-    background: rgba(10, 20, 32, 0.5);
-    text-align: left;
-    display: none;
-  }
-  .pause-setting-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 8px;
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    color: var(--hud-dim);
-  }
-  @media (max-width: 720px) {
-    .creator-grid { grid-template-columns: 1fr; }
-  }
+  @media (max-width: 720px) { .creator-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 720px) { .dev-grid { grid-template-columns: 1fr; } }
 
   @media (max-width: 980px), (pointer: coarse) {
     #hud-controls { display: none; }
-    #hud-goals {
-      right: 10px;
-      top: 10px;
-      max-width: 50vw;
-      min-width: 170px;
-      padding: 8px 10px;
-      font-size: 11px;
-    }
-    #hud-stats {
-      left: 10px;
-      top: 10px;
-      min-width: 156px;
-      padding: 8px 10px;
-    }
-    #hud-codex {
-      left: 10px;
-      bottom: 96px;
-      min-width: 170px;
-      max-width: 54vw;
-      padding: 7px 9px;
-    }
-    #hud-biome {
-      left: 10px;
-      top: 96px;
-      min-width: 132px;
-      padding: 7px 10px;
-    }
+    #hud-goals { right: 12px; top: 12px; max-width: 50vw; min-width: 168px; padding: 11px 12px; font-size: 11px; }
+    #hud-stats { left: 12px; top: 12px; min-width: 160px; padding: 11px 12px; }
+    #hud-codex { left: 12px; bottom: 98px; min-width: 168px; max-width: 54vw; padding: 9px 11px; }
+    #hud-biome { left: 12px; top: 118px; min-width: 132px; padding: 9px 12px; }
     #mobile-controls { display: block; }
-    #intro .controls-hint { letter-spacing: 0.08em; font-size: 10px; }
+    .modal { padding: 28px 24px; }
+    #intro .controls-hint { letter-spacing: 0.1em; font-size: 9px; }
   }
+
   .creator-chip {
-    padding: 4px 10px;
-    border: 1px solid var(--hud-line);
-    border-radius: 4px;
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    color: var(--hud-dim);
-    cursor: pointer;
-    background: rgba(10, 20, 32, 0.5);
-    transition: all 0.12s;
+    padding: 5px 12px; border: 1px solid var(--line); border-radius: var(--r);
+    font-size: 11px; letter-spacing: 0.08em; color: var(--dim); cursor: pointer;
+    background: transparent; transition: color 0.15s, border-color 0.15s, background 0.15s;
   }
-  .creator-chip:hover { color: var(--hud-fg); border-color: rgba(120,200,255,0.35); }
-  .creator-chip.active {
-    color: var(--hud-fg);
-    border-color: rgba(120, 200, 255, 0.55);
-    background: rgba(30, 55, 80, 0.6);
-  }
+  .creator-chip:hover { color: var(--fg); border-color: var(--line-strong); }
+  .creator-chip.active { color: var(--accent); border-color: var(--accent-soft); background: rgba(95,214,255,0.06); }
   .color-swatch {
-    width: 26px; height: 26px;
-    border-radius: 50%;
-    cursor: pointer;
-    border: 2px solid transparent;
-    transition: border-color 0.12s, transform 0.12s;
+    width: 24px; height: 24px; border-radius: 50%; cursor: pointer;
+    border: 2px solid transparent; transition: border-color 0.15s, transform 0.15s;
   }
-  .color-swatch:hover { transform: scale(1.15); }
-  .color-swatch.active { border-color: rgba(255,255,255,0.8); transform: scale(1.12); }
+  .color-swatch:hover { transform: scale(1.12); }
+  .color-swatch.active { border-color: var(--accent); transform: scale(1.1); }
 </style>
 </head>
 <body>
@@ -771,14 +448,19 @@
         <div class="stat-value" id="val-health">100</div>
       </div>
       <div class="stat-row">
-        <div class="stat-label">Energy</div>
+        <div class="stat-label">Food</div>
         <div class="bar-track bar-energy"><div class="bar-fill" id="bar-energy"></div></div>
         <div class="stat-value" id="val-energy">100</div>
       </div>
       <div class="stat-row">
-        <div class="stat-label">Size</div>
+        <div class="stat-label">Mut Pts</div>
+        <div class="bar-track bar-mut"><div class="bar-fill" id="bar-mut"></div></div>
+        <div class="stat-value" id="val-mut">0</div>
+      </div>
+      <div class="stat-row">
+        <div class="stat-label">Growth</div>
         <div class="bar-track bar-size"><div class="bar-fill" id="bar-size"></div></div>
-        <div class="stat-value" id="val-size">1.0</div>
+        <div class="stat-value" id="val-size">L0</div>
       </div>
     </div>
 
@@ -855,7 +537,216 @@
         <div id="pause-settings-panel">
           <div class="pause-setting-row"><span>Audio</span><button class="creator-mini-btn" id="pause-audio-btn" type="button">Toggle Audio</button></div>
           <div class="pause-setting-row"><span>Zoom</span><button class="creator-mini-btn" id="pause-reset-zoom-btn" type="button">Reset Zoom</button></div>
+          <div class="pause-setting-row"><span>Controls</span><button class="creator-mini-btn" id="pause-controls-btn" type="button">Rebind Keys</button></div>
+          <div id="controls-rebind-panel">
+            <div class="rebind-section-title">Movement</div>
+            <div class="rebind-row"><span>Move Up</span><button class="bind-btn" data-action="moveUp">W</button></div>
+            <div class="rebind-row"><span>Move Down</span><button class="bind-btn" data-action="moveDown">S</button></div>
+            <div class="rebind-row"><span>Move Left</span><button class="bind-btn" data-action="moveLeft">A</button></div>
+            <div class="rebind-row"><span>Move Right</span><button class="bind-btn" data-action="moveRight">D</button></div>
+            <div class="rebind-row"><span>Dash</span><button class="bind-btn" data-action="dash">Shift</button></div>
+            <div class="rebind-section-title">Actions</div>
+            <div class="rebind-row"><span>Action Slot I</span><button class="bind-btn" data-action="slot1">Space</button></div>
+            <div class="rebind-row"><span>Action Slot II</span><button class="bind-btn" data-action="slot2">E</button></div>
+            <div class="rebind-row"><span>Action Slot III</span><button class="bind-btn" data-action="slot3">Q</button></div>
+            <div class="rebind-row"><span>Action Menu</span><button class="bind-btn" data-action="actionMenu">X</button></div>
+            <div style="display:flex;gap:6px;margin-top:8px;">
+              <button class="creator-mini-btn" id="controls-reset-btn" type="button">Reset Defaults</button>
+            </div>
+          </div>
           <button class="creator-mini-btn" id="pause-settings-close-btn" type="button">Close Settings</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Creature Action Menu (X key) -->
+    <div id="action-menu" class="overlay">
+      <div class="modal">
+        <div class="modal-title">Action Bindings</div>
+        <div class="modal-subtitle">Drag or click an action onto a slot to bind it.</div>
+        <div class="action-hint">Click an action card, then click a slot — or drag directly.</div>
+        <div class="action-slots-grid">
+          <div class="action-slot-col">
+            <div class="action-slot-key" id="slot-s1-key">[ Space ]</div>
+            <div class="action-slot-target" data-slot="s1">
+              <span class="action-icon">🦷</span>
+              <span id="slot-s1-name">Bite</span>
+            </div>
+          </div>
+          <div class="action-slot-col">
+            <div class="action-slot-key" id="slot-s2-key">[ E ]</div>
+            <div class="action-slot-target" data-slot="s2">
+              <span class="action-icon">🔍</span>
+              <span id="slot-s2-name">Inspect</span>
+            </div>
+          </div>
+          <div class="action-slot-col">
+            <div class="action-slot-key" id="slot-s3-key">[ Q ]</div>
+            <div class="action-slot-target" data-slot="s3">
+              <span class="action-icon">⚡</span>
+              <span id="slot-s3-name">Surge</span>
+            </div>
+          </div>
+        </div>
+        <div class="action-palette-label">Available Actions</div>
+        <div id="action-palette"></div>
+        <button class="btn" id="action-menu-close-btn">Close  [ X ]</button>
+      </div>
+    </div>
+
+    <!-- Developer Tools overlay -->
+    <div id="dev-tools" class="overlay">
+      <div class="modal" id="dev-tools-panel">
+        <div class="modal-title">Developer Tools</div>
+        <div class="modal-subtitle" style="margin-bottom: 12px;">Press ` to close</div>
+        <div class="dev-grid">
+          <div class="dev-block">
+            <h4>Creature Density</h4>
+            <div class="dev-row">
+              <div>
+                Carnivore spawns
+                <small>Higher values bias future spawns toward carnivores.</small>
+              </div>
+              <div class="dev-readout" id="dev-carnivore-value">1.00x</div>
+              <input id="dev-carnivore" type="range" min="0.25" max="3" step="0.05" value="1">
+            </div>
+            <div class="dev-row">
+              <div>
+                Herbivore spawns
+                <small>Raises grazing creature density.</small>
+              </div>
+              <div class="dev-readout" id="dev-herbivore-value">1.00x</div>
+              <input id="dev-herbivore" type="range" min="0.25" max="3" step="0.05" value="1">
+            </div>
+            <div class="dev-row">
+              <div>
+                Omnivore spawns
+                <small>Raises mixed-diet creature density.</small>
+              </div>
+              <div class="dev-readout" id="dev-omnivore-value">1.00x</div>
+              <input id="dev-omnivore" type="range" min="0.25" max="3" step="0.05" value="1">
+            </div>
+            <div class="dev-row">
+              <div>
+                Outer-field bias
+                <small>Pushes more creatures into the far-off area around the render edge.</small>
+              </div>
+              <div class="dev-readout" id="dev-outer-value">1.60x</div>
+              <input id="dev-outer" type="range" min="0.5" max="3" step="0.05" value="1.6">
+            </div>
+          </div>
+          <div class="dev-block">
+            <h4>World Density</h4>
+            <div class="dev-row">
+              <div>
+                Plant density
+                <small>More distant plant structures and faster repopulation.</small>
+              </div>
+              <div class="dev-readout" id="dev-plant-value">1.10x</div>
+              <input id="dev-plant" type="range" min="0.5" max="3" step="0.05" value="1.1">
+            </div>
+            <div class="dev-row">
+              <div>
+                Rock density
+                <small>Controls how many rocks are created in each generated ring.</small>
+              </div>
+              <div class="dev-readout" id="dev-rock-value">1.00x</div>
+              <input id="dev-rock" type="range" min="0.5" max="3" step="0.05" value="1">
+            </div>
+            <div class="dev-actions">
+              <button class="creator-mini-btn" id="dev-seed-wave-btn" type="button">Seed Far Creatures</button>
+              <button class="creator-mini-btn" id="dev-rebuild-rocks-btn" type="button">Rebuild Nearby Rocks</button>
+              <button class="creator-mini-btn" id="dev-reset-btn" type="button">Reset Defaults</button>
+              <button class="creator-mini-btn" id="dev-close-btn" type="button">Close</button>
+            </div>
+            <div class="dev-note">
+              Sliders apply immediately to future spawning. Rock density is rebuilt nearby with the button so the world updates right away.
+            </div>
+          </div>
+          <div class="dev-block">
+            <h4>Prototype Systems</h4>
+            <div class="dev-row">
+              <div>
+                Soft creature integration
+                <small>Runs prototype soft bodies in the live world without replacing plants, rocks, carnivores, or the endless map.</small>
+              </div>
+              <div class="dev-readout" id="dev-soft-status">Off</div>
+            </div>
+            <div class="dev-actions">
+              <button class="creator-mini-btn" id="dev-soft-toggle-btn" type="button">Enable Soft Creatures</button>
+              <button class="creator-mini-btn" id="dev-soft-respawn-btn" type="button">Respawn Soft Creatures</button>
+              <button class="creator-mini-btn" id="dev-open-lab-btn" type="button">Open Creature Lab</button>
+            </div>
+            <div class="dev-note">
+              Press <kbd>`</kbd> at any time to open this menu. Soft creatures are an additive prototype layer and do not replace the original Drift entities yet.
+            </div>
+          </div>
+          <!-- ── Creature Stats tuning block ────────────────────────────── -->
+          <div class="dev-block">
+            <h4>Creature Stats</h4>
+            <div class="dev-row">
+              <div>Speed — base (growth 0)<small>Lower bound of the base genome speed range.</small></div>
+              <div class="dev-readout" id="dev-speed-base-val">10</div>
+              <input id="dev-speed-base" type="range" min="2" max="60" step="1" value="10">
+            </div>
+            <div class="dev-row">
+              <div>Speed — max (growth 0)<small>Upper bound of the base genome speed range.</small></div>
+              <div class="dev-readout" id="dev-speed-max-val">36</div>
+              <input id="dev-speed-max" type="range" min="5" max="120" step="1" value="36">
+            </div>
+            <div class="dev-row">
+              <div>Speed — growth multiplier<small>Each growth level multiplies speed by this factor.</small></div>
+              <div class="dev-readout" id="dev-speed-gmul-val">1.10×</div>
+              <input id="dev-speed-gmul" type="range" min="1.00" max="1.50" step="0.01" value="1.10">
+            </div>
+            <div class="dev-row">
+              <div>Damage — base<small>Base bite/weapon damage at growth level 0.</small></div>
+              <div class="dev-readout" id="dev-damage-base-val">6</div>
+              <input id="dev-damage-base" type="range" min="1" max="40" step="1" value="6">
+            </div>
+            <div class="dev-row">
+              <div>Damage — growth multiplier<small>Each growth level multiplies damage by this factor.</small></div>
+              <div class="dev-readout" id="dev-damage-gmul-val">1.12×</div>
+              <input id="dev-damage-gmul" type="range" min="1.00" max="1.50" step="0.01" value="1.12">
+            </div>
+            <div class="dev-row">
+              <div>Turn rate — base max (rad/s)<small>Maximum turn speed at growth level 0.</small></div>
+              <div class="dev-readout" id="dev-turn-base-val">0.22</div>
+              <input id="dev-turn-base" type="range" min="0.05" max="1.20" step="0.01" value="0.22">
+            </div>
+            <div class="dev-row">
+              <div>Turn rate — range max (rad/s)<small>Upper end of the turn-speed genome range.</small></div>
+              <div class="dev-readout" id="dev-turn-max-val">0.50</div>
+              <input id="dev-turn-max" type="range" min="0.10" max="2.00" step="0.01" value="0.50">
+            </div>
+            <div class="dev-row">
+              <div>Turn rate — growth multiplier<small>Each growth level multiplies turn rate by this factor.</small></div>
+              <div class="dev-readout" id="dev-turn-gmul-val">1.06×</div>
+              <input id="dev-turn-gmul" type="range" min="1.00" max="1.30" step="0.01" value="1.06">
+            </div>
+            <div class="dev-row">
+              <div>Awareness — base range (px)<small>Lower bound of sight/smell range at growth level 0.</small></div>
+              <div class="dev-readout" id="dev-aware-base-val">70</div>
+              <input id="dev-aware-base" type="range" min="20" max="300" step="5" value="70">
+            </div>
+            <div class="dev-row">
+              <div>Awareness — max range (px)<small>Upper bound of sight/smell range at growth level 0.</small></div>
+              <div class="dev-readout" id="dev-aware-max-val">180</div>
+              <input id="dev-aware-max" type="range" min="50" max="600" step="5" value="180">
+            </div>
+            <div class="dev-row">
+              <div>Awareness — growth multiplier<small>Each growth level multiplies sense range by this factor.</small></div>
+              <div class="dev-readout" id="dev-aware-gmul-val">1.08×</div>
+              <input id="dev-aware-gmul" type="range" min="1.00" max="1.40" step="0.01" value="1.08">
+            </div>
+            <div class="dev-actions">
+              <button class="creator-mini-btn" id="dev-stats-reset-btn" type="button">Reset Defaults</button>
+              <button class="creator-mini-btn" id="dev-stats-copy-btn" type="button">Copy Config to Clipboard</button>
+            </div>
+            <div class="dev-note">
+              Sliders take effect on next creature spawn (or Respawn Soft Creatures). <em>Copy Config</em> puts a pasteable JS block on your clipboard for permanent code changes.
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -916,28 +807,6 @@
             </div>
             <div class="creator-sublabel" id="trait-desc">No bonus, no cost. Pure adaptation.</div>
           </div>
-
-          <div class="creator-block">
-            <div class="creator-label">Build Focus</div>
-            <div class="creator-row" id="build-choices">
-              <div class="creator-chip active" data-build="balanced">Balanced</div>
-              <div class="creator-chip" data-build="swift">Swift</div>
-              <div class="creator-chip" data-build="armored">Armored</div>
-              <div class="creator-chip" data-build="efficient">Efficient</div>
-            </div>
-            <div class="creator-sublabel" id="build-desc">No stat bias. Neutral opening.</div>
-          </div>
-
-          <div class="creator-block">
-            <div class="creator-label">Quick Presets</div>
-            <div class="creator-row" id="preset-choices">
-              <div class="creator-chip" data-preset="grazer">Grazer</div>
-              <div class="creator-chip" data-preset="hunter">Hunter</div>
-              <div class="creator-chip" data-preset="drifter">Drifter</div>
-              <div class="creator-chip" data-preset="tank">Tank</div>
-            </div>
-            <div class="creator-sublabel">One tap setup for a stronger starting identity.</div>
-          </div>
         </div>
 
         <div class="creator-actions">
@@ -981,7 +850,7 @@
     };
 
     // Creator state
-    window.CREATOR = { body: 'round', hue: 195, diet: 'herbivore', trait: 'none', build: 'balanced' };
+    window.CREATOR = { body: 'round', hue: 195, diet: 'herbivore', trait: 'none' };
 
     const DIET_DESC = {
       herbivore: 'Plant clusters give 3× energy. Gains passive regen. Cannot eat meat.',
@@ -994,28 +863,13 @@
       armor:       '+20% defense. −10% speed.',
       metabolism:  '−25% energy use. Heals 25% slower.',
     };
-    const BUILD_DESC = {
-      balanced: 'No stat bias. Neutral opening.',
-      swift: 'Faster acceleration and top speed. Lower defense.',
-      armored: 'Higher defense and max HP. Lower speed.',
-      efficient: 'Lower metabolism and stronger regen. Lower bite pressure.'
-    };
-    const PRESETS = {
-      grazer: { body: 'soft', hue: 110, diet: 'herbivore', trait: 'metabolism', build: 'efficient' },
-      hunter: { body: 'long', hue: 0, diet: 'carnivore', trait: 'fins', build: 'swift' },
-      drifter: { body: 'oval', hue: 195, diet: 'herbivore', trait: 'eyes', build: 'balanced' },
-      tank: { body: 'round', hue: 30, diet: 'carnivore', trait: 'armor', build: 'armored' },
-    };
-
     function syncCreatorUI() {
       document.querySelectorAll('#body-choices .creator-chip').forEach(c => c.classList.toggle('active', c.dataset.body === window.CREATOR.body));
       document.querySelectorAll('#color-choices .color-swatch').forEach(c => c.classList.toggle('active', parseInt(c.dataset.hue) === window.CREATOR.hue));
       document.querySelectorAll('#diet-choices .creator-chip').forEach(c => c.classList.toggle('active', c.dataset.diet === window.CREATOR.diet));
       document.querySelectorAll('#trait-choices .creator-chip').forEach(c => c.classList.toggle('active', c.dataset.trait === window.CREATOR.trait));
-      document.querySelectorAll('#build-choices .creator-chip').forEach(c => c.classList.toggle('active', c.dataset.build === window.CREATOR.build));
       document.getElementById('diet-desc').textContent = DIET_DESC[window.CREATOR.diet] || '';
       document.getElementById('trait-desc').textContent = TRAIT_DESC[window.CREATOR.trait] || '';
-      document.getElementById('build-desc').textContent = BUILD_DESC[window.CREATOR.build] || '';
       drawCreatorPreview();
     }
 
@@ -1059,33 +913,15 @@
         drawCreatorPreview();
       });
 
-      document.getElementById('build-choices').addEventListener('click', (e) => {
-        const chip = e.target.closest('[data-build]');
-        if (!chip) return;
-        window.CREATOR.build = chip.dataset.build;
-        syncCreatorUI();
-      });
-
-      document.getElementById('preset-choices').addEventListener('click', (e) => {
-        const chip = e.target.closest('[data-preset]');
-        if (!chip) return;
-        const preset = PRESETS[chip.dataset.preset];
-        if (!preset) return;
-        Object.assign(window.CREATOR, preset);
-        syncCreatorUI();
-      });
-
       document.getElementById('creator-randomize-btn').addEventListener('click', () => {
         const bodies = ['round', 'oval', 'long', 'soft'];
         const colors = [195, 280, 50, 0, 110, 30];
         const diets = ['herbivore', 'carnivore'];
         const traits = ['none', 'fins', 'eyes', 'armor', 'metabolism'];
-        const builds = ['balanced', 'swift', 'armored', 'efficient'];
         window.CREATOR.body = bodies[Math.floor(Math.random() * bodies.length)];
         window.CREATOR.hue = colors[Math.floor(Math.random() * colors.length)];
         window.CREATOR.diet = diets[Math.floor(Math.random() * diets.length)];
         window.CREATOR.trait = traits[Math.floor(Math.random() * traits.length)];
-        window.CREATOR.build = builds[Math.floor(Math.random() * builds.length)];
         syncCreatorUI();
       });
 
@@ -1098,7 +934,7 @@
       const ctx = canvas.getContext('2d');
       const W = canvas.width, H = canvas.height;
       const cx = W / 2, cy = H / 2;
-      const { body, hue, diet } = window.CREATOR;
+      const { body, hue, diet, trait } = window.CREATOR;
       ctx.clearRect(0, 0, W, H);
 
       // glow
@@ -1142,9 +978,63 @@
       if (diet === 'herbivore') {
         ctx.strokeStyle = `hsla(110,70%,55%,0.7)`; ctx.lineWidth = 1.2;
         ctx.beginPath(); ctx.arc(cx, cy, r*1.4, 0, Math.PI*2); ctx.stroke();
+      } else {
+        ctx.strokeStyle = `hsla(0,72%,56%,0.65)`; ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r*1.42, -Math.PI*0.14, Math.PI*0.34);
+        ctx.stroke();
+      }
+
+      // starting adaptation indicator on preview
+      if (trait === 'fins') {
+        ctx.fillStyle = `hsla(${hue},72%,70%,0.62)`;
+        ctx.beginPath();
+        ctx.moveTo(cx - r * 0.08, cy - r * 0.78);
+        ctx.quadraticCurveTo(cx - r * 0.82, cy - r * 1.28, cx - r * 0.95, cy - r * 0.52);
+        ctx.lineTo(cx - r * 0.4, cy - r * 0.62);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(cx - r * 0.08, cy + r * 0.78);
+        ctx.quadraticCurveTo(cx - r * 0.82, cy + r * 1.28, cx - r * 0.95, cy + r * 0.52);
+        ctx.lineTo(cx - r * 0.4, cy + r * 0.62);
+        ctx.closePath();
+        ctx.fill();
+      } else if (trait === 'eyes') {
+        ctx.fillStyle = 'rgba(255,255,255,0.86)';
+        ctx.beginPath(); ctx.arc(cx - r * 0.62, cy - r * 0.42, r * 0.11, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx - r * 0.74, cy - r * 0.04, r * 0.095, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = 'rgba(0,0,0,0.92)';
+        ctx.beginPath(); ctx.arc(cx - r * 0.62, cy - r * 0.42, r * 0.05, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx - r * 0.74, cy - r * 0.04, r * 0.04, 0, Math.PI * 2); ctx.fill();
+      } else if (trait === 'armor') {
+        ctx.strokeStyle = `hsla(${hue},28%,84%,0.74)`;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.ellipse(cx, cy, r * 1.22, r * 1.02, 0, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.ellipse(cx, cy, r * 1.05, r * 0.85, 0, 0, Math.PI * 2); ctx.stroke();
+      } else if (trait === 'metabolism') {
+        ctx.strokeStyle = `hsla(60,80%,72%,0.72)`;
+        ctx.lineWidth = 1.25;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - r * 0.62);
+        ctx.lineTo(cx, cy + r * 0.38);
+        ctx.lineTo(cx + r * 0.32, cy + r * 58 / 100);
+        ctx.stroke();
       }
     }
   </script>
+  <script src="js/creatures/random.js"></script>
+  <script src="js/creatures/creature-types.js"></script>
+  <script src="js/creatures/creature-genome.js"></script>
+  <script src="js/creatures/creature-physics.js"></script>
+  <script src="js/creatures/creature-parts.js"></script>
+  <script src="js/creatures/creature-growth.js"></script>
+  <script src="js/creatures/creature-movement.js"></script>
+  <script src="js/creatures/creature-ai.js"></script>
+  <script src="js/creatures/creature-renderer.js"></script>
+  <script src="js/creatures/creature.js"></script>
+  <script src="js/creatures/creature-factory.js"></script>
+  <script src="js/creatures/creature-debug.js"></script>
   <script src="game.js"></script>
 </body>
 </html>
