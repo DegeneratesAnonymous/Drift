@@ -1969,7 +1969,7 @@ class CreatureBody {
   // plate, mandible, filtermouth, eyespot, frill) still use drawPart().
 
   static get DYNAMIC_PARTS() {
-    return new Set(['tail', 'fin', 'cilia', 'tendril']);
+    return CreatureBody._DYNAMIC_PARTS_SET;
   }
 
   _initAppendages() {
@@ -2316,6 +2316,8 @@ class CreatureBody {
     ctx.restore();
   }
 }
+
+CreatureBody._DYNAMIC_PARTS_SET = new Set(['tail', 'fin', 'cilia', 'tendril']);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CREATURE
