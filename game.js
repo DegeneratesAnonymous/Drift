@@ -1589,15 +1589,14 @@ class Player extends Entity {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CREATURE BODY — cosmetic procedural-body module (P0: stub)
+// CREATURE BODY — cosmetic procedural-body module
 //
 // CreatureBody is a *purely cosmetic* layer.  It reads authoritative position /
 // velocity / angle from the Creature it is attached to but never writes back to
 // those fields.  Gameplay (collision, AI, saves, seed replay) is unaffected.
 //
-// Each phase (P1–P5) extends this class with real simulation.  While
-// T.PROC_BODY is false the module is instantiated but its draw() is never
-// called, so zero extra cost is incurred at runtime.
+// P1 adds a spine chain for oval/long bodies.
+// P2 (next) adds a Verlet soft-body membrane for soft/round bodies.
 // ─────────────────────────────────────────────────────────────────────────────
 class CreatureBody {
   /**
@@ -1607,31 +1606,245 @@ class CreatureBody {
   constructor(creature, bodySeed) {
     this.creature = creature;
     this.bodySeed = bodySeed;
-    // Populated by P1 (spine nodes) or P2 (membrane nodes).
+    // spine nodes for long/oval; membrane nodes for soft/round (P2).
     this.nodes = [];
+    this._ready = false;
   }
 
-  /**
-   * Advance the cosmetic simulation by dt seconds.
-   * Called every frame regardless of T.PROC_BODY so the sim stays warm if the
-   * flag is toggled at runtime.  P0: no-op.
-   * @param {number} dt
-   */
+  // ── helpers ────────────────────────────────────────────────────────────────
+
+  _isSpineBody() {
+    const b = this.creature.body;
+    return b === 'long' || b === 'oval';
+  }
+
+  _nodeCount() {
+    return this.creature.body === 'long' ? 8 : 5;
+  }
+
+  _segLen() {
+    const c = this.creature;
+    return c.r * (c.body === 'long' ? 0.46 : 0.34);
+  }
+
+  _maxBend() {
+    return this.creature.body === 'long' ? 0.48 : 0.28; // radians per segment
+  }
+
+  // ── spine init / update ───────────────────────────────────────────────────
+
+  _initSpine() {
+    const c = this.creature;
+    const N = this._nodeCount();
+    const seg = this._segLen();
+    this.nodes = [];
+    for (let i = 0; i < N; i++) {
+      this.nodes.push({
+        x: c.x - Math.cos(c.angle) * seg * i,
+        y: c.y - Math.sin(c.angle) * seg * i,
+        angle: c.angle,
+      });
+    }
+    this._ready = true;
+  }
+
+  _updateSpine() {
+    const c = this.creature;
+    const nodes = this.nodes;
+    const N = nodes.length;
+    const seg = this._segLen();
+    const maxBend = this._maxBend();
+
+    // Head node is driven entirely by the authoritative creature position/angle.
+    nodes[0].x = c.x;
+    nodes[0].y = c.y;
+    nodes[0].angle = c.angle;
+
+    for (let i = 1; i < N; i++) {
+      const par = nodes[i - 1];
+      const cur = nodes[i];
+
+      // Direction cur → parent (the "forward" direction for this node).
+      const dx = par.x - cur.x;
+      const dy = par.y - cur.y;
+      const dist = Math.hypot(dx, dy);
+      const rawAngle = dist > 0.001 ? Math.atan2(dy, dx) : par.angle;
+
+      // Clamp the turn relative to the parent node's facing angle.
+      let delta = rawAngle - par.angle;
+      while (delta >  Math.PI) delta -= TAU;
+      while (delta < -Math.PI) delta += TAU;
+      const clampedAngle = par.angle + clamp(delta, -maxBend, maxBend);
+
+      // Place this node exactly segLen behind the parent along the clamped direction.
+      cur.x = par.x - Math.cos(clampedAngle) * seg;
+      cur.y = par.y - Math.sin(clampedAngle) * seg;
+      cur.angle = clampedAngle;
+    }
+  }
+
+  // ── public API ─────────────────────────────────────────────────────────────
+
   update(dt) {
-    // P1+ fills this in.
+    if (!this._isSpineBody()) return; // P2 handles soft/round
+    if (!this._ready) this._initSpine();
+    this._updateSpine();
   }
 
-  /**
-   * Draw the procedural body on top of / instead of the legacy shape.
-   * Only called when T.PROC_BODY is true.  P0: no-op (legacy draw runs).
-   * @param {CanvasRenderingContext2D} ctx
-   * @param {number} camX
-   * @param {number} camY
-   * @param {number} w   Canvas width
-   * @param {number} h   Canvas height
-   */
   draw(ctx, camX, camY, w, h) {
-    // P1+ fills this in.
+    if (!this._isSpineBody() || !this._ready) return;
+    this._drawSpine(ctx, camX, camY, w, h);
+  }
+
+  // ── spine drawing ─────────────────────────────────────────────────────────
+
+  _drawSpine(ctx, camX, camY, w, h) {
+    const c = this.creature;
+    const nodes = this.nodes;
+    const N = nodes.length;
+    const ox = -camX + w * 0.5;
+    const oy = -camY + h * 0.5;
+
+    const deathFade = 1;
+    const gLevelC = c.growthLevel || 0;
+    const spineExt = 1 + Math.min(gLevelC, 9) * 0.02;
+    const baseR = c.r * spineExt;
+
+    // Per-node cross-section radii: full near head, tapered at tail.
+    const nodeR = [];
+    for (let i = 0; i < N; i++) {
+      const t = i / (N - 1);
+      nodeR[i] = baseR * lerp(0.82, 0.14, t);
+    }
+    // Head tip: extends forward of node 0.
+    const headTipLen = baseR * (c.body === 'long' ? 0.55 : 0.42);
+    const tailForkW  = nodeR[N - 1] * 2.4;  // tail lobe spread
+
+    // Build left/right edge points in screen space.
+    const left  = new Array(N);
+    const right = new Array(N);
+    for (let i = 0; i < N; i++) {
+      const n = nodes[i];
+      const nr = nodeR[i];
+      const perp = n.angle + HALF_PI;
+      left[i]  = { x: n.x + ox + Math.cos(perp) * nr, y: n.y + oy + Math.sin(perp) * nr };
+      right[i] = { x: n.x + ox - Math.cos(perp) * nr, y: n.y + oy - Math.sin(perp) * nr };
+    }
+    // Head tip.
+    const hn = nodes[0];
+    const htip = {
+      x: hn.x + ox + Math.cos(hn.angle) * headTipLen,
+      y: hn.y + oy + Math.sin(hn.angle) * headTipLen,
+    };
+    // Tail fork lobes (bifurcated tail fin).
+    const tn = nodes[N - 1];
+    const tperpL = tn.angle + HALF_PI;
+    const tperpR = tn.angle - HALF_PI;
+    const tailTip = {
+      x: tn.x + ox - Math.cos(tn.angle) * baseR * 0.45,
+      y: tn.y + oy - Math.sin(tn.angle) * baseR * 0.45,
+    };
+    const tailTopL = {
+      x: tn.x + ox + Math.cos(tperpL) * tailForkW - Math.cos(tn.angle) * baseR * 0.30,
+      y: tn.y + oy + Math.sin(tperpL) * tailForkW - Math.sin(tn.angle) * baseR * 0.30,
+    };
+    const tailTopR = {
+      x: tn.x + ox + Math.cos(tperpR) * tailForkW - Math.cos(tn.angle) * baseR * 0.30,
+      y: tn.y + oy + Math.sin(tperpR) * tailForkW - Math.sin(tn.angle) * baseR * 0.30,
+    };
+
+    // ── Body fill & outline ─────────────────────────────────────────────────
+    const bodyHue   = c.hue;
+    const bodySat   = c.sat;
+    const bodyLight = c.light;
+
+    ctx.save();
+    ctx.fillStyle   = hslaCSS(bodyHue, bodySat, bodyLight, 0.9 * deathFade);
+    ctx.strokeStyle = hslaCSS(bodyHue, bodySat, Math.min(100, bodyLight + 18), 0.75 * deathFade);
+    ctx.lineWidth   = Math.max(0.8, baseR * 0.038);
+    ctx.beginPath();
+
+    // Start at head top (left side of head).
+    ctx.moveTo(left[0].x, left[0].y);
+    // Bezier through left side toward tail.
+    for (let i = 1; i < N; i++) {
+      const prev = left[i - 1];
+      const cur  = left[i];
+      const mx = (prev.x + cur.x) * 0.5;
+      const my = (prev.y + cur.y) * 0.5;
+      ctx.quadraticCurveTo(prev.x, prev.y, mx, my);
+    }
+    ctx.lineTo(left[N - 1].x, left[N - 1].y);
+    // Tail fork (left lobe → tip → right lobe).
+    ctx.bezierCurveTo(
+      left[N-1].x, left[N-1].y,
+      tailTopL.x, tailTopL.y,
+      tailTip.x, tailTip.y
+    );
+    ctx.bezierCurveTo(
+      tailTip.x, tailTip.y,
+      tailTopR.x, tailTopR.y,
+      right[N-1].x, right[N-1].y
+    );
+    // Right side back to head.
+    for (let i = N - 2; i >= 0; i--) {
+      const prev = right[i + 1];
+      const cur  = right[i];
+      const mx = (prev.x + cur.x) * 0.5;
+      const my = (prev.y + cur.y) * 0.5;
+      ctx.quadraticCurveTo(prev.x, prev.y, mx, my);
+    }
+    // Head cap bezier through the nose tip.
+    ctx.bezierCurveTo(
+      right[0].x, right[0].y,
+      htip.x, htip.y,
+      left[0].x, left[0].y
+    );
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // ── Belly / shading stripe ──────────────────────────────────────────────
+    ctx.fillStyle = hslaCSS(bodyHue, bodySat - 10, Math.max(20, bodyLight - 22), 0.38 * deathFade);
+    ctx.beginPath();
+    ctx.moveTo(left[0].x, left[0].y);
+    for (let i = 1; i < N; i++) {
+      const mx = (left[i-1].x + left[i].x) * 0.5;
+      const my = (left[i-1].y + left[i].y) * 0.5;
+      ctx.quadraticCurveTo(left[i-1].x, left[i-1].y, mx, my);
+    }
+    for (let i = N - 1; i >= 0; i--) {
+      const mx = i > 0 ? (right[i].x + right[i-1].x) * 0.5 : right[0].x;
+      const my = i > 0 ? (right[i].y + right[i-1].y) * 0.5 : right[0].y;
+      ctx.quadraticCurveTo(right[i].x, right[i].y, mx, my);
+    }
+    ctx.closePath();
+    ctx.fill();
+
+    // ── Eye ────────────────────────────────────────────────────────────────
+    const eyeNode = nodes[0];
+    const eyePerp = eyeNode.angle - HALF_PI * 0.65;
+    const eyeDist = nodeR[0] * 0.62;
+    const ex = eyeNode.x + ox + Math.cos(eyeNode.angle) * nodeR[0] * 0.28 + Math.cos(eyePerp) * eyeDist;
+    const ey = eyeNode.y + oy + Math.sin(eyeNode.angle) * nodeR[0] * 0.28 + Math.sin(eyePerp) * eyeDist;
+    const er = baseR * 0.145;
+    ctx.fillStyle = hslaCSS(0, 0, 96, 0.88 * deathFade);
+    ctx.beginPath(); ctx.arc(ex, ey, er, 0, TAU); ctx.fill();
+    ctx.fillStyle = hslaCSS(bodyHue + 20, 65, 45, 0.85 * deathFade);
+    ctx.beginPath(); ctx.arc(ex + er * 0.14, ey, er * 0.63, 0, TAU); ctx.fill();
+    ctx.fillStyle = hslaCSS(0, 0, 8, deathFade);
+    ctx.beginPath(); ctx.arc(ex + er * 0.20, ey, er * 0.36, 0, TAU); ctx.fill();
+    ctx.fillStyle = hslaCSS(0, 0, 100, 0.82 * deathFade);
+    ctx.beginPath(); ctx.arc(ex + er * 0.30, ey - er * 0.22, er * 0.17, 0, TAU); ctx.fill();
+
+    // ── Parts (anchored to spine nodes) ───────────────────────────────────
+    // Parts are still drawn in creature-local space. We temporarily set up a
+    // transform centred on the head node so drawPart() works unchanged.
+    ctx.translate(nodes[0].x + ox, nodes[0].y + oy);
+    ctx.rotate(nodes[0].angle);
+    for (const part of c.parts) c.drawPart(ctx, part, baseR, deathFade);
+
+    ctx.restore();
   }
 }
 
