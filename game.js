@@ -1599,6 +1599,7 @@ class Player extends Entity {
 // P2 adds a Verlet soft-body membrane for soft/round bodies.
 // P3 adds procedural appendage chains for trailing parts (tail, fin, cilia, tendril).
 // P4 adds CA-driven skin markings and grow-in animation when growthLevel increases.
+// P5 adds LOD fallback for distant/off-screen creatures, getMouthAnchor(), and node caps.
 // ─────────────────────────────────────────────────────────────────────────────
 class CreatureBody {
   /**
@@ -1921,6 +1922,47 @@ class CreatureBody {
     }
   }
 
+  // ── P5: LOD fallback ──────────────────────────────────────────────────────
+  // Distant/off-screen creatures skip the full physics sim (procBody.update()
+  // is never called when distantUpdate is true — Creature.update() returns
+  // early).  On the draw side we fall back to a simple ellipse so the body
+  // still looks correct without stale or uninitialised physics data.
+
+  _drawFallback(ctx, camX, camY, w, h) {
+    const c = this.creature;
+    const sx = c.x - camX + w * 0.5;
+    const sy = c.y - camY + h * 0.5;
+    const r = c.r;
+    const isLong = c.body === 'long';
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(c.angle);
+    ctx.fillStyle = hslaCSS(c.hue, c.sat, c.light, 0.88);
+    ctx.beginPath();
+    if (isLong) {
+      ctx.ellipse(0, 0, r * 0.92, r * 0.34, 0, 0, TAU);
+    } else {
+      ctx.ellipse(0, 0, r * 0.78, r * 0.62, 0, 0, TAU);
+    }
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Returns the world-space mouth position for use by eat animations.
+  // When PROC_BODY is enabled the head node tracks the creature's facing
+  // direction exactly, so food pull lines follow the animated snout.
+  getMouthAnchor() {
+    if (this._ready && this.nodes.length > 0) {
+      const head = this.nodes[0];
+      return { x: head.x + Math.cos(head.angle) * this.creature.r * 0.55,
+               y: head.y + Math.sin(head.angle) * this.creature.r * 0.55 };
+    }
+    // Fallback: just in front of the creature centre.
+    const c = this.creature;
+    return { x: c.x + Math.cos(c.angle) * c.r * 0.55,
+             y: c.y + Math.sin(c.angle) * c.r * 0.55 };
+  }
+
   // ── appendage chains (P3) ────────────────────────────────────────────────
   // Trailing parts (tail, fin, cilia, tendril) become short node chains that
   // physically trail from their anchor nodes.  Static decorative parts (spike,
@@ -2104,6 +2146,12 @@ class CreatureBody {
   }
 
   draw(ctx, camX, camY, w, h) {
+    // P5 LOD: distant creatures haven't had update() called, so physics state
+    // is stale or uninitialised.  Draw a simple fallback ellipse instead.
+    if (this.creature.distantUpdate) {
+      this._drawFallback(ctx, camX, camY, w, h);
+      return;
+    }
     // Trailing appendages draw behind the body
     if (this._appsReady) this._drawAppendages(ctx, camX, camY, w, h);
     if (this._isSpineBody() && this._ready) {
@@ -2359,6 +2407,15 @@ class Creature extends Entity {
     if (this.behavior === 'ambush') base *= 0.6;
     if (this.parts.includes('eyespot')) base *= 1.2;
     return base;
+  }
+
+  // Returns the world-space position of the creature's mouth.
+  // When T.PROC_BODY is on the head node tracks the facing direction, so eat
+  // animations and targeting lines follow the animated snout.
+  getMouthAnchor() {
+    if (T.PROC_BODY && this.procBody) return this.procBody.getMouthAnchor();
+    return { x: this.x + Math.cos(this.angle) * this.r * 0.55,
+             y: this.y + Math.sin(this.angle) * this.r * 0.55 };
   }
 
   _hasAnyPart(partList) {
