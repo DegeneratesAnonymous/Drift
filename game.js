@@ -1597,6 +1597,7 @@ class Player extends Entity {
 //
 // P1 adds a spine chain for oval/long bodies.
 // P2 adds a Verlet soft-body membrane for soft/round bodies.
+// P3 adds procedural appendage chains for trailing parts (tail, fin, cilia, tendril).
 // ─────────────────────────────────────────────────────────────────────────────
 class CreatureBody {
   /**
@@ -1823,6 +1824,171 @@ class CreatureBody {
     ctx.restore();
   }
 
+  // ── appendage chains (P3) ────────────────────────────────────────────────
+  // Trailing parts (tail, fin, cilia, tendril) become short node chains that
+  // physically trail from their anchor nodes.  Static decorative parts (spike,
+  // plate, mandible, filtermouth, eyespot, frill) still use drawPart().
+
+  static get DYNAMIC_PARTS() {
+    return new Set(['tail', 'fin', 'cilia', 'tendril']);
+  }
+
+  _initAppendages() {
+    this._appendages = [];
+    const c = this.creature;
+    const isSpine = this._isSpineBody();
+    const N = isSpine ? this.nodes.length : 0;
+
+    for (const part of c.parts) {
+      if (part === 'tail') {
+        const ai = isSpine ? N - 1 : -1;
+        this._appendages.push({
+          kind: 'tail', anchorIdx: ai, side: 0, maxBend: 0.55,
+          segLen: c.r * 0.28,
+          nodes: this._buildChainNodes(ai, 0, 5, c.r * 0.28, Math.PI),
+        });
+      } else if (part === 'tendril') {
+        this._appendages.push({
+          kind: 'tendril', anchorIdx: 0, side: 0, maxBend: 0.75,
+          segLen: c.r * 0.24,
+          nodes: this._buildChainNodes(0, 0, 4, c.r * 0.24, 0),
+        });
+      } else if (part === 'fin') {
+        const ai = isSpine ? Math.floor(N * 0.38) : -1;
+        for (const side of [-1, 1]) {
+          this._appendages.push({
+            kind: 'fin', anchorIdx: ai, side, maxBend: 0.45,
+            segLen: c.r * 0.20,
+            nodes: this._buildChainNodes(ai, side, 3, c.r * 0.20, HALF_PI * side),
+          });
+        }
+      } else if (part === 'cilia') {
+        const count = 8;
+        for (let i = 0; i < count; i++) {
+          const ai = isSpine ? Math.round((i / count) * (N - 1)) : -1;
+          const baseAngle = isSpine ? HALF_PI * (i % 2 === 0 ? 1 : -1) : (i / count) * TAU;
+          this._appendages.push({
+            kind: 'cilia', anchorIdx: ai, side: 0, maxBend: 0.90,
+            segLen: c.r * 0.46, ciliaIdx: i, ciliaTotal: count,
+            nodes: this._buildChainNodes(ai, 0, 2, c.r * 0.46, baseAngle),
+          });
+        }
+      }
+    }
+    this._appsReady = true;
+  }
+
+  _buildChainNodes(anchorIdx, side, numNodes, segLen, baseAngle) {
+    const c = this.creature;
+    const anchor = (anchorIdx >= 0 && this.nodes.length > anchorIdx)
+      ? this.nodes[anchorIdx] : c;
+    const perpOx = side !== 0 ? Math.cos(anchor.angle + HALF_PI * Math.sign(side)) * c.r * 0.72 : 0;
+    const perpOy = side !== 0 ? Math.sin(anchor.angle + HALF_PI * Math.sign(side)) * c.r * 0.72 : 0;
+    const startAngle = anchor.angle + baseAngle;
+    const result = [];
+    for (let i = 0; i < numNodes; i++) {
+      result.push({
+        x: anchor.x + perpOx + Math.cos(startAngle) * segLen * i,
+        y: anchor.y + perpOy + Math.sin(startAngle) * segLen * i,
+        angle: startAngle,
+      });
+    }
+    return result;
+  }
+
+  _updateAppendages() {
+    const c = this.creature;
+    for (const app of this._appendages) {
+      const nodes = app.nodes;
+      const anchorNode = (app.anchorIdx >= 0 && this.nodes.length > app.anchorIdx)
+        ? this.nodes[app.anchorIdx] : c;
+      const perpOx = app.side !== 0 ? Math.cos(anchorNode.angle + HALF_PI * Math.sign(app.side)) * c.r * 0.72 : 0;
+      const perpOy = app.side !== 0 ? Math.sin(anchorNode.angle + HALF_PI * Math.sign(app.side)) * c.r * 0.72 : 0;
+      nodes[0].x = anchorNode.x + perpOx;
+      nodes[0].y = anchorNode.y + perpOy;
+      nodes[0].angle = anchorNode.angle;
+
+      for (let i = 1; i < nodes.length; i++) {
+        const par = nodes[i - 1];
+        const cur = nodes[i];
+        const dx = par.x - cur.x;
+        const dy = par.y - cur.y;
+        const dist = Math.hypot(dx, dy);
+        const rawAngle = dist > 0.001 ? Math.atan2(dy, dx) : par.angle;
+        let delta = rawAngle - par.angle;
+        while (delta >  Math.PI) delta -= TAU;
+        while (delta < -Math.PI) delta += TAU;
+        const clampedAngle = par.angle + clamp(delta, -app.maxBend, app.maxBend);
+        cur.x = par.x - Math.cos(clampedAngle) * app.segLen;
+        cur.y = par.y - Math.sin(clampedAngle) * app.segLen;
+        cur.angle = clampedAngle;
+      }
+    }
+  }
+
+  _drawAppendages(ctx, camX, camY, w, h) {
+    const c = this.creature;
+    const ox = -camX + w * 0.5;
+    const oy = -camY + h * 0.5;
+
+    for (const app of this._appendages) {
+      const nodes = app.nodes;
+      const N2 = nodes.length;
+      if (app.kind === 'tail') {
+        const tailNode = nodes[N2 - 1];
+        const forkW = c.r * 0.38;
+        ctx.fillStyle   = hslaCSS(c.hue, c.sat - 8, c.light + 12, 0.72);
+        ctx.strokeStyle = hslaCSS(c.hue, c.sat, c.light + 18, 0.50);
+        ctx.lineWidth   = Math.max(0.5, c.r * 0.028);
+        for (const lobe of [-1, 1]) {
+          const lp = tailNode.angle + HALF_PI * lobe;
+          const forkTip = {
+            x: tailNode.x + ox + Math.cos(tailNode.angle + Math.PI) * c.r * 0.28,
+            y: tailNode.y + oy + Math.sin(tailNode.angle + Math.PI) * c.r * 0.28,
+          };
+          const forkTop = {
+            x: tailNode.x + ox + Math.cos(lp) * forkW + Math.cos(tailNode.angle + Math.PI) * c.r * 0.15,
+            y: tailNode.y + oy + Math.sin(lp) * forkW + Math.sin(tailNode.angle + Math.PI) * c.r * 0.15,
+          };
+          ctx.beginPath();
+          ctx.moveTo(nodes[0].x + ox, nodes[0].y + oy);
+          for (let i = 1; i < N2; i++) ctx.lineTo(nodes[i].x + ox, nodes[i].y + oy);
+          ctx.bezierCurveTo(
+            forkTop.x, forkTop.y, forkTop.x, forkTop.y, forkTip.x, forkTip.y
+          );
+          ctx.stroke();
+        }
+      } else if (app.kind === 'fin') {
+        ctx.fillStyle   = hslaCSS(c.hue, c.sat - 12, c.light + 18, 0.42);
+        ctx.strokeStyle = hslaCSS(c.hue, c.sat - 5, c.light + 8, 0.50);
+        ctx.lineWidth   = Math.max(0.5, c.r * 0.024);
+        ctx.beginPath();
+        ctx.moveTo(nodes[0].x + ox, nodes[0].y + oy);
+        for (let i = 1; i < N2; i++) ctx.lineTo(nodes[i].x + ox, nodes[i].y + oy);
+        ctx.lineTo(nodes[0].x + ox, nodes[0].y + oy);
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+      } else if (app.kind === 'tendril') {
+        ctx.strokeStyle = hslaCSS(c.hue, c.sat - 5, c.light + 15, 0.62);
+        ctx.lineWidth   = Math.max(0.5, c.r * 0.045);
+        ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(nodes[0].x + ox, nodes[0].y + oy);
+        for (let i = 1; i < N2; i++) ctx.lineTo(nodes[i].x + ox, nodes[i].y + oy);
+        ctx.stroke();
+        ctx.lineCap = 'butt';
+      } else if (app.kind === 'cilia') {
+        ctx.strokeStyle = hslaCSS(c.hue, c.sat, c.light + 10, 0.48);
+        ctx.lineWidth   = Math.max(0.5, c.r * 0.038);
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(nodes[0].x + ox, nodes[0].y + oy);
+        ctx.lineTo(nodes[N2 - 1].x + ox, nodes[N2 - 1].y + oy);
+        ctx.stroke();
+        ctx.lineCap = 'butt';
+      }
+    }
+  }
+
   // ── public API ─────────────────────────────────────────────────────────────
 
   update(dt) {
@@ -1833,9 +1999,13 @@ class CreatureBody {
       if (!this._memReady) this._initMembrane();
       this._updateMembrane();
     }
+    if ((this._ready || this._memReady) && !this._appsReady) this._initAppendages();
+    if (this._appsReady) this._updateAppendages();
   }
 
   draw(ctx, camX, camY, w, h) {
+    // Trailing appendages draw behind the body
+    if (this._appsReady) this._drawAppendages(ctx, camX, camY, w, h);
     if (this._isSpineBody() && this._ready) {
       this._drawSpine(ctx, camX, camY, w, h);
     } else if (this._isSoftBody() && this._memReady) {
@@ -1985,11 +2155,13 @@ class CreatureBody {
     ctx.beginPath(); ctx.arc(ex + er * 0.30, ey - er * 0.22, er * 0.17, 0, TAU); ctx.fill();
 
     // ── Parts (anchored to spine nodes) ───────────────────────────────────
-    // Parts are still drawn in creature-local space. We temporarily set up a
-    // transform centred on the head node so drawPart() works unchanged.
+    // P3 dynamic parts (tail, fin, cilia, tendril) are handled by appendage
+    // chains; only static decorative parts are drawn here via drawPart().
     ctx.translate(nodes[0].x + ox, nodes[0].y + oy);
     ctx.rotate(nodes[0].angle);
-    for (const part of c.parts) c.drawPart(ctx, part, baseR, deathFade);
+    for (const part of c.parts) {
+      if (!CreatureBody.DYNAMIC_PARTS.has(part)) c.drawPart(ctx, part, baseR, deathFade);
+    }
 
     ctx.restore();
   }
