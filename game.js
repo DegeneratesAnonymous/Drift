@@ -1596,7 +1596,7 @@ class Player extends Entity {
 // those fields.  Gameplay (collision, AI, saves, seed replay) is unaffected.
 //
 // P1 adds a spine chain for oval/long bodies.
-// P2 (next) adds a Verlet soft-body membrane for soft/round bodies.
+// P2 adds a Verlet soft-body membrane for soft/round bodies.
 // ─────────────────────────────────────────────────────────────────────────────
 class CreatureBody {
   /**
@@ -1683,17 +1683,164 @@ class CreatureBody {
     }
   }
 
+  // ── soft-body helpers (P2) ────────────────────────────────────────────────
+
+  _isSoftBody() {
+    const b = this.creature.body;
+    return b === 'soft' || b === 'round';
+  }
+
+  _membraneCount() {
+    return this.creature.body === 'soft' ? 12 : 10;
+  }
+
+  _initMembrane() {
+    const c = this.creature;
+    const N = this._membraneCount();
+    const r = c.r * 0.88;
+    this.memNodes = [];
+    for (let i = 0; i < N; i++) {
+      const a = (TAU * i) / N;
+      const x = c.x + Math.cos(a) * r;
+      const y = c.y + Math.sin(a) * r;
+      this.memNodes.push({ x, y, px: x, py: y });
+    }
+    this._memRestLen = [];
+    this._memBaseR = c.r;
+    for (let i = 0; i < N; i++) {
+      const j = (i + 1) % N;
+      this._memRestLen.push(Math.hypot(
+        this.memNodes[j].x - this.memNodes[i].x,
+        this.memNodes[j].y - this.memNodes[i].y
+      ));
+    }
+    this._memReady = true;
+  }
+
+  _updateMembrane() {
+    const c = this.creature;
+    const nodes = this.memNodes;
+    const N = nodes.length;
+    const SUB = 3;
+    const DAMPING = 0.89;
+    const K_SPRING = 0.26;
+    const K_PRESS = 0.20;
+    const scale = c.r / this._memBaseR;
+
+    for (let s = 0; s < SUB; s++) {
+      // Verlet integrate
+      for (let i = 0; i < N; i++) {
+        const n = nodes[i];
+        const vx = (n.x - n.px) * DAMPING;
+        const vy = (n.y - n.py) * DAMPING;
+        n.px = n.x; n.py = n.y;
+        n.x += vx; n.y += vy;
+      }
+
+      // Perimeter spring constraints
+      for (let i = 0; i < N; i++) {
+        const j = (i + 1) % N;
+        const a = nodes[i], b = nodes[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.hypot(dx, dy) || 0.001;
+        const rest = this._memRestLen[i] * scale;
+        const corr = (dist - rest) / dist * 0.5 * K_SPRING;
+        a.x += dx * corr;  a.y += dy * corr;
+        b.x -= dx * corr;  b.y -= dy * corr;
+      }
+
+      // Area-preservation pressure
+      let area = 0;
+      for (let i = 0; i < N; i++) {
+        const j = (i + 1) % N;
+        area += nodes[i].x * nodes[j].y - nodes[j].x * nodes[i].y;
+      }
+      area = Math.abs(area) * 0.5;
+      const targetArea = Math.PI * (c.r * 0.88 * scale) * (c.r * 0.88 * scale);
+      if (area > 0.001) {
+        const pressure = K_PRESS * (targetArea - area) / targetArea;
+        for (let i = 0; i < N; i++) {
+          const j = (i + 1) % N;
+          const a = nodes[i], b = nodes[j];
+          const ex = b.x - a.x, ey = b.y - a.y;
+          const edgeLen = Math.hypot(ex, ey) || 0.001;
+          const nx = -ey / edgeLen, ny = ex / edgeLen;
+          a.x += nx * pressure;  a.y += ny * pressure;
+          b.x += nx * pressure;  b.y += ny * pressure;
+        }
+      }
+
+      // Pin centroid to authoritative creature position
+      let cx = 0, cy = 0;
+      for (const n of nodes) { cx += n.x; cy += n.y; }
+      cx /= N; cy /= N;
+      const offX = c.x - cx, offY = c.y - cy;
+      for (const n of nodes) { n.x += offX; n.y += offY; n.px += offX; n.py += offY; }
+    }
+  }
+
+  _drawMembrane(ctx, camX, camY, w, h) {
+    const c = this.creature;
+    const nodes = this.memNodes;
+    const N = nodes.length;
+    const ox = -camX + w * 0.5;
+    const oy = -camY + h * 0.5;
+
+    ctx.save();
+    ctx.fillStyle   = hslaCSS(c.hue, c.sat, c.light, 0.88);
+    ctx.strokeStyle = hslaCSS(c.hue, c.sat, Math.min(100, c.light + 18), 0.70);
+    ctx.lineWidth   = Math.max(0.8, c.r * 0.042);
+
+    // Smooth closed bezier through membrane nodes
+    ctx.beginPath();
+    const mx0 = (nodes[N - 1].x + nodes[0].x) * 0.5 + ox;
+    const my0 = (nodes[N - 1].y + nodes[0].y) * 0.5 + oy;
+    ctx.moveTo(mx0, my0);
+    for (let i = 0; i < N; i++) {
+      const j = (i + 1) % N;
+      const mx = (nodes[i].x + nodes[j].x) * 0.5 + ox;
+      const my = (nodes[i].y + nodes[j].y) * 0.5 + oy;
+      ctx.quadraticCurveTo(nodes[i].x + ox, nodes[i].y + oy, mx, my);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // Eye — anchored to creature heading
+    const eyeAngle = c.angle - HALF_PI * 0.5;
+    const eyeR = c.r * 0.21;
+    const ex = c.x + ox + Math.cos(c.angle) * c.r * 0.30 + Math.cos(eyeAngle) * c.r * 0.26;
+    const ey = c.y + oy + Math.sin(c.angle) * c.r * 0.30 + Math.sin(eyeAngle) * c.r * 0.26;
+    ctx.fillStyle = hslaCSS(0, 0, 96, 0.88);
+    ctx.beginPath(); ctx.arc(ex, ey, eyeR, 0, TAU); ctx.fill();
+    ctx.fillStyle = hslaCSS(c.hue + 20, 65, 45, 0.85);
+    ctx.beginPath(); ctx.arc(ex + eyeR * 0.14, ey, eyeR * 0.63, 0, TAU); ctx.fill();
+    ctx.fillStyle = hslaCSS(0, 0, 8, 1);
+    ctx.beginPath(); ctx.arc(ex + eyeR * 0.20, ey, eyeR * 0.36, 0, TAU); ctx.fill();
+    ctx.fillStyle = hslaCSS(0, 0, 100, 0.82);
+    ctx.beginPath(); ctx.arc(ex + eyeR * 0.30, ey - eyeR * 0.22, eyeR * 0.17, 0, TAU); ctx.fill();
+
+    ctx.restore();
+  }
+
   // ── public API ─────────────────────────────────────────────────────────────
 
   update(dt) {
-    if (!this._isSpineBody()) return; // P2 handles soft/round
-    if (!this._ready) this._initSpine();
-    this._updateSpine();
+    if (this._isSpineBody()) {
+      if (!this._ready) this._initSpine();
+      this._updateSpine();
+    } else if (this._isSoftBody()) {
+      if (!this._memReady) this._initMembrane();
+      this._updateMembrane();
+    }
   }
 
   draw(ctx, camX, camY, w, h) {
-    if (!this._isSpineBody() || !this._ready) return;
-    this._drawSpine(ctx, camX, camY, w, h);
+    if (this._isSpineBody() && this._ready) {
+      this._drawSpine(ctx, camX, camY, w, h);
+    } else if (this._isSoftBody() && this._memReady) {
+      this._drawMembrane(ctx, camX, camY, w, h);
+    }
   }
 
   // ── spine drawing ─────────────────────────────────────────────────────────
