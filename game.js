@@ -2578,8 +2578,8 @@ class Creature extends Entity {
     this.hunger = Math.min(this.maxHunger, this.hunger + dt * 0.02);
     this.stateT += dt;
 
-    // Advance cosmetic body simulation (no-op until P1+ is implemented).
-    this.procBody.update(dt);
+    // Advance cosmetic body simulation (skipped when feature flag is off).
+    if (T.PROC_BODY) this.procBody.update(dt);
 
   }
 
