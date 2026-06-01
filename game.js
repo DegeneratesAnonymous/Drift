@@ -64,6 +64,9 @@ const T = {
   DESPAWN_RADIUS: 2200,
   GRID_CELL: 180,
   DT_MAX: 0.05,
+  // Feature flag: set true to enable procedural body sim (P1–P5).
+  // When false the game renders identically to pre-P0 behaviour.
+  PROC_BODY: false,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1586,6 +1589,53 @@ class Player extends Entity {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CREATURE BODY — cosmetic procedural-body module (P0: stub)
+//
+// CreatureBody is a *purely cosmetic* layer.  It reads authoritative position /
+// velocity / angle from the Creature it is attached to but never writes back to
+// those fields.  Gameplay (collision, AI, saves, seed replay) is unaffected.
+//
+// Each phase (P1–P5) extends this class with real simulation.  While
+// T.PROC_BODY is false the module is instantiated but its draw() is never
+// called, so zero extra cost is incurred at runtime.
+// ─────────────────────────────────────────────────────────────────────────────
+class CreatureBody {
+  /**
+   * @param {Creature} creature  Owning creature (read-only reference).
+   * @param {number}   bodySeed  Deterministic seed for reproducible body shape.
+   */
+  constructor(creature, bodySeed) {
+    this.creature = creature;
+    this.bodySeed = bodySeed;
+    // Populated by P1 (spine nodes) or P2 (membrane nodes).
+    this.nodes = [];
+  }
+
+  /**
+   * Advance the cosmetic simulation by dt seconds.
+   * Called every frame regardless of T.PROC_BODY so the sim stays warm if the
+   * flag is toggled at runtime.  P0: no-op.
+   * @param {number} dt
+   */
+  update(dt) {
+    // P1+ fills this in.
+  }
+
+  /**
+   * Draw the procedural body on top of / instead of the legacy shape.
+   * Only called when T.PROC_BODY is true.  P0: no-op (legacy draw runs).
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {number} camX
+   * @param {number} camY
+   * @param {number} w   Canvas width
+   * @param {number} h   Canvas height
+   */
+  draw(ctx, camX, camY, w, h) {
+    // P1+ fills this in.
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CREATURE
 // ─────────────────────────────────────────────────────────────────────────────
 class Creature extends Entity {
@@ -1657,8 +1707,17 @@ class Creature extends Entity {
     // NPC mating cooldown (seconds). 0 = ready.
     this.mateCD = 0;
 
+    // bodySeed: deterministic from the creature's own rng stream so bodies
+    // reproduce identically from the same game seed.  Old saves that lack this
+    // field will reconstruct a stable default via opts.bodySeed fallback.
+    this.bodySeed = opts.bodySeed !== undefined ? opts.bodySeed : rng();
+
     this._ensureCoreAnatomy(rng);
     this._refreshGrowthLevel(rng, true);
+
+    // Cosmetic procedural-body module.  Instantiated here so the object is
+    // always present; drawing is gated by T.PROC_BODY inside Creature.draw().
+    this.procBody = new CreatureBody(this, this.bodySeed);
   }
 
   detection() {
@@ -1825,6 +1884,9 @@ class Creature extends Entity {
     this.growthPulse = Math.max(0, this.growthPulse - dt * 1.05);
     this.hunger = Math.min(this.maxHunger, this.hunger + dt * 0.02);
     this.stateT += dt;
+
+    // Advance cosmetic body simulation (no-op until P1+ is implemented).
+    this.procBody.update(dt);
 
   }
 
@@ -2292,6 +2354,10 @@ class Creature extends Entity {
     for (const part of this.parts) this.drawPart(ctx, part, r, deathFade);
 
     ctx.restore();
+
+    // When the procedural body is enabled, let it draw on top.
+    // (P0: no-op — real drawing begins in P1.)
+    if (T.PROC_BODY) this.procBody.draw(ctx, camX, camY, w, h);
 
     if (!this.dead && this.hp < this.maxHP) {
       const bw = Math.max(16, r * 2.1);
