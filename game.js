@@ -1598,6 +1598,7 @@ class Player extends Entity {
 // P1 adds a spine chain for oval/long bodies.
 // P2 adds a Verlet soft-body membrane for soft/round bodies.
 // P3 adds procedural appendage chains for trailing parts (tail, fin, cilia, tendril).
+// P4 adds CA-driven skin markings and grow-in animation when growthLevel increases.
 // ─────────────────────────────────────────────────────────────────────────────
 class CreatureBody {
   /**
@@ -1824,6 +1825,102 @@ class CreatureBody {
     ctx.restore();
   }
 
+  // ── CA skin markings & grow-in animation (P4) ────────────────────────────
+
+  _initCA() {
+    const CA_SIZE = 8;
+    // Deterministic PRNG seeded from bodySeed so markings reproduce on reload.
+    let s = Math.abs(this.bodySeed * 2654435761) >>> 0;
+    const next = () => { s = (s ^ (s >>> 13)) >>> 0; s = (s ^ (s << 17)) >>> 0; s = (s ^ (s >>> 5)) >>> 0; return s; };
+    this._ca = [];
+    for (let r = 0; r < CA_SIZE; r++) {
+      this._ca[r] = [];
+      for (let c = 0; c < CA_SIZE; c++) {
+        this._ca[r][c] = (next() % 100 < 32) ? 1 : 0; // ~32% density seed
+      }
+    }
+    // Run 3 Conway B3/S23 steps for a natural, stable pattern.
+    for (let step = 0; step < 3; step++) this._stepCA(CA_SIZE);
+    this._caReady = true;
+    this._growAnim = 1;   // at init, body is fully "grown in"
+    this._growLevel = 0;  // matches creature's current growthLevel at init
+  }
+
+  _stepCA(sz) {
+    const next = [];
+    for (let r = 0; r < sz; r++) {
+      next[r] = [];
+      for (let c = 0; c < sz; c++) {
+        let n = 0;
+        for (let dr = -1; dr <= 1; dr++) {
+          for (let dc = -1; dc <= 1; dc++) {
+            if (dr === 0 && dc === 0) continue;
+            n += this._ca[(r + dr + sz) % sz][(c + dc + sz) % sz];
+          }
+        }
+        const alive = this._ca[r][c];
+        next[r][c] = (alive ? (n === 2 || n === 3) : n === 3) ? 1 : 0;
+      }
+    }
+    this._ca = next;
+  }
+
+  // Called by Creature._addComplexityPoint() when T.PROC_BODY is true.
+  notifyGrowth(newLevel) {
+    if (newLevel <= this._growLevel) return;
+    this._growLevel = newLevel;
+    this._growAnim = 0;           // trigger grow-in animation
+    // Evolve the CA one step so skin markings change at each growth level.
+    if (this._caReady) this._stepCA(8);
+    // Re-init appendages for any newly added parts (handled in next update()).
+    this._appsReady = false;
+  }
+
+  _drawCAMarkings(ctx, camX, camY, w, h) {
+    if (!this._caReady) return;
+    const c = this.creature;
+    const ox = -camX + w * 0.5;
+    const oy = -camY + h * 0.5;
+    const CA_SIZE = 8;
+    const alpha = 0.22 * this._growAnim;
+    if (alpha < 0.01) return;
+
+    ctx.fillStyle = hslaCSS(c.hue + 15, c.sat + 10, Math.max(20, c.light - 20), alpha);
+
+    const isSpine = this._isSpineBody();
+    const bodyLen = isSpine
+      ? (this.nodes.length - 1) * this._segLen() * 2
+      : c.r * 1.6;
+    const bodyWidth = c.r * 0.7;
+
+    for (let row = 0; row < CA_SIZE; row++) {
+      for (let col = 0; col < CA_SIZE; col++) {
+        if (!this._ca[row][col]) continue;
+        const u = (col + 0.5) / CA_SIZE - 0.5;   // -0.5..0.5 along body axis
+        const v = (row + 0.5) / CA_SIZE - 0.5;   // -0.5..0.5 perpendicular
+        let px, py;
+        if (isSpine && this.nodes.length > 0) {
+          // Map along spine using linear interpolation between nodes.
+          const spineT = u + 0.5; // 0..1 from head to tail
+          const nodeT = spineT * (this.nodes.length - 1);
+          const ni = Math.min(Math.floor(nodeT), this.nodes.length - 2);
+          const frac = nodeT - ni;
+          const na = this.nodes[ni], nb = this.nodes[ni + 1];
+          const spineX = na.x + (nb.x - na.x) * frac;
+          const spineY = na.y + (nb.y - na.y) * frac;
+          const ang = na.angle;
+          px = spineX + ox + Math.cos(ang + HALF_PI) * v * bodyWidth * 1.6;
+          py = spineY + oy + Math.sin(ang + HALF_PI) * v * bodyWidth * 1.6;
+        } else {
+          px = c.x + ox + Math.cos(c.angle) * u * bodyLen + Math.cos(c.angle + HALF_PI) * v * bodyLen * 0.55;
+          py = c.y + oy + Math.sin(c.angle) * u * bodyLen + Math.sin(c.angle + HALF_PI) * v * bodyLen * 0.55;
+        }
+        const dotR = Math.max(0.9, c.r * 0.06);
+        ctx.beginPath(); ctx.arc(px, py, dotR, 0, TAU); ctx.fill();
+      }
+    }
+  }
+
   // ── appendage chains (P3) ────────────────────────────────────────────────
   // Trailing parts (tail, fin, cilia, tendril) become short node chains that
   // physically trail from their anchor nodes.  Static decorative parts (spike,
@@ -1999,6 +2096,9 @@ class CreatureBody {
       if (!this._memReady) this._initMembrane();
       this._updateMembrane();
     }
+    if (!this._caReady) this._initCA();
+    // Advance grow-in animation (0→1 over ~0.7 s).
+    if (this._growAnim < 1) this._growAnim = Math.min(1, this._growAnim + dt / 0.7);
     if ((this._ready || this._memReady) && !this._appsReady) this._initAppendages();
     if (this._appsReady) this._updateAppendages();
   }
@@ -2011,6 +2111,8 @@ class CreatureBody {
     } else if (this._isSoftBody() && this._memReady) {
       this._drawMembrane(ctx, camX, camY, w, h);
     }
+    // CA markings on top of the body fill.
+    if (this._caReady) this._drawCAMarkings(ctx, camX, camY, w, h);
   }
 
   // ── spine drawing ─────────────────────────────────────────────────────────
@@ -2301,10 +2403,12 @@ class Creature extends Entity {
     const missing = dietPool.filter((part) => !this.parts.includes(part));
     if (missing.length > 0) {
       this.parts.push(rngPick(rng, missing));
-      return;
+    } else {
+      // If all available parts already exist, convert complexity to slight body growth.
+      this.r = Math.min(this.baseR * 1.95, this.r * 1.01 + 0.12);
     }
-    // If all available parts already exist, convert complexity to slight body growth.
-    this.r = Math.min(this.baseR * 1.95, this.r * 1.01 + 0.12);
+    // Notify the cosmetic body so it can animate the structural change.
+    if (T.PROC_BODY && this.procBody) this.procBody.notifyGrowth(this.growthLevel);
   }
 
   takeDamage(amount, source, game, hitFrom = null) {
