@@ -83,9 +83,11 @@ window.DriftCreatures.generateCreatureGenome = function (seed, biomeTier) {
     seed: seed,
 
     body: {
-      nodeCount:    D.randInt(rand, 8, 18),
+      nodeCount:    D.randInt(rand, 10, 16),
       baseRadius:   D.randRange(rand, 12, 34) * (1 + biomeTier * 0.15),
-      elongation:   D.randRange(rand, 0.82, 1.55),
+      // Capped at 1.35: anything more elongated produced thin needle-like
+      // silhouettes that the spine renderer rendered as crescents.
+      elongation:   D.randRange(rand, 0.9, 1.35),
       asymmetry:    D.randRange(rand, 0, 0.08),
       softness:     D.randRange(rand, 0.48, 0.72),
       wobbleAmount: D.randRange(rand, 0.02, 0.2)

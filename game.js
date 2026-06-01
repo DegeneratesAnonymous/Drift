@@ -51,17 +51,17 @@ const T = {
   STARTING_DNA: 0,
   MEAT_DECAY_TIME: 40,
   EAT_SPEED_MUL: 0.4,
-  PLANT_CAP: 16,
+  PLANT_CAP: 36,
   ROCK_COUNT: 18,
   MATE_RANGE: 55,
   MATE_TIME: 2.2,
   EGG_HATCH_TIME: 5.0,
   ESCORT_RANGE: 260,
-  CREATURE_CAP: 140,
+  CREATURE_CAP: 200,
   FOOD_CAP: 280,
   HAZARD_CAP: 24,
-  SPAWN_RADIUS: 1400,
-  DESPAWN_RADIUS: 2200,
+  SPAWN_RADIUS: 1700,
+  DESPAWN_RADIUS: 3200,
   GRID_CELL: 180,
   DT_MAX: 0.05,
 };
@@ -810,7 +810,9 @@ function creatureGrowthMul(c) {
 // same values (chunk-eat tier, leaf-eat tier, etc.).
 window.GROWTH_THRESHOLDS = window.GROWTH_THRESHOLDS || {
   npcMateMin:      3, // NPC needs this growth level before reproducing
-  plantChunkEat:   7, // future plant system: growth needed to consume chunks
+  // Keep default at 0 so herbivore starts are never soft-locked out of food.
+  // Designers can still raise this live from the dev menu.
+  plantChunkEat:   0, // growth needed to consume loose plant chunks
   plantLeafEat:    3, // future plant system: growth needed to consume leaves
   plantNodeEat:    7, // future plant system: growth needed to consume nodes
   branchPushable:  3, // future plant system: branch tier that becomes pushable
@@ -1652,6 +1654,9 @@ class Creature extends Entity {
     this.evadeBias = rng() < 0.5 ? -1 : 1;
     this.growthLevel = 0;
     this.bonusComplexity = 0;
+    this.forageAnchorX = x;
+    this.forageAnchorY = y;
+    this.forageAnchorT = 0;
     this.propulsion = TEMPLATE_PROPULSION[template.id] || 'glide';
     this._propulsionT = rng() * (PROPULSION_PROFILES[this.propulsion].cycle || 1.0);
     // NPC mating cooldown (seconds). 0 = ready.
@@ -1933,6 +1938,18 @@ class Creature extends Entity {
       }
     }
 
+    // Baseline behavior request: if not actively fleeing/fighting, creatures
+    // should always be pursuing food or a mate.
+    const combatOrFear = (next === 'flee' || next === 'attack' || next === 'hunt' || next === 'huntCreature');
+    if (!combatOrFear && next !== 'scavenge' && next !== 'escort') {
+      const mate = game.findMateTargetForCreature(this, 620);
+      if (mate) {
+        next = 'seekMate';
+      } else {
+        next = 'seekFood';
+      }
+    }
+
     if (next !== this.state) {
       this.state = next;
       this.stateT = 0;
@@ -1948,11 +1965,18 @@ class Creature extends Entity {
       }
     }
     if (next === 'flee') this.target = p;
+    if (next === 'seekMate') {
+      this.targetT -= 0.35;
+      if (!this.target || this.target.dead || this.targetT < 0 || this.target.mateCD > 0) {
+        this.target = game.findMateTargetForCreature(this, 700);
+        this.targetT = 0.8 + Math.random() * 0.8;
+      }
+    }
     if (next === 'seekFood' || next === 'scavenge') {
       this.targetT -= 0.4;
       if (!this.target || this.target.dead || this.targetT < 0) {
         if (next === 'scavenge') this.target = game.findCorpse(this.x, this.y, 600);
-        else this.target = game.findFoodTargetForCreature(this, 480, true);
+        else this.target = game.findFoodTargetForCreature(this, 620, true);
         this.targetT = 1.0 + Math.random();
       }
     }
@@ -1985,12 +2009,47 @@ class Creature extends Entity {
         else { this.wanderAngle += (Math.random() - 0.5) * 1.1 * dt; goalX = this.x + Math.cos(this.wanderAngle) * 140; goalY = this.y + Math.sin(this.wanderAngle) * 140; drive = 0.35; }
         break;
       case 'seekFood':
-        if (this.target && !this.target.dead) { goalX = this.target.x; goalY = this.target.y; drive = 0.88; }
-        else {
+        if (this.target && !this.target.dead) {
+          goalX = this.target.x;
+          goalY = this.target.y;
+          drive = 0.88;
+
+          // Linger in food-rich patches rather than instantly leaving after
+          // one chunk; this creates realistic local foraging behavior.
+          const near = game.grid.query(this.target.x, this.target.y, 130, game._scratch);
+          let fx = 0, fy = 0, fn = 0;
+          for (let i = 0; i < near.length; i++) {
+            const e = near[i];
+            if (!e || e.dead || e.kind !== 'food') continue;
+            if (this.diet === 'herbivore' && e.type !== 'plant') continue;
+            if (this.diet === 'carnivore' && e.type !== 'meat') continue;
+            fx += e.x; fy += e.y; fn++;
+          }
+          if (fn >= 3) {
+            this.forageAnchorX = fx / fn;
+            this.forageAnchorY = fy / fn;
+            this.forageAnchorT = Math.max(this.forageAnchorT, Math.min(8, 2.2 + fn * 0.45));
+          }
+          if (this.forageAnchorT > 0) {
+            this.forageAnchorT = Math.max(0, this.forageAnchorT - dt);
+            goalX = goalX * 0.55 + this.forageAnchorX * 0.45;
+            goalY = goalY * 0.55 + this.forageAnchorY * 0.45;
+            drive = Math.min(drive, 0.72);
+          }
+        } else {
           this.wanderAngle += (Math.random() - 0.5) * 1.5 * dt;
           goalX = this.x + Math.cos(this.wanderAngle) * 220;
           goalY = this.y + Math.sin(this.wanderAngle) * 220;
           drive = 0.58;
+        }
+        break;
+      case 'seekMate':
+        if (this.target && !this.target.dead) {
+          goalX = this.target.x;
+          goalY = this.target.y;
+          drive = 0.82;
+        } else {
+          this.state = 'seekFood';
         }
         break;
       case 'scavenge':
@@ -2125,11 +2184,14 @@ class Creature extends Entity {
     }
 
     // Propulsion envelope — produces a thrust multiplier from the profile.
+    // Larger creatures stroke less frequently.
+    const sizeCadenceMul = clamp(1 + Math.max(0, this.r - 12) / 24, 1, 2.4);
     this._propulsionT = (this._propulsionT || 0) + dt;
     let thrustMul = profile.cruiseStrength;
     if (profile.cycle > 0) {
-      const t = this._propulsionT % profile.cycle;
-      const burstDur = profile.cycle * profile.burstFrac;
+      const effCycle = profile.cycle * sizeCadenceMul;
+      const t = this._propulsionT % effCycle;
+      const burstDur = effCycle * profile.burstFrac;
       if (t < burstDur) {
         // Half-sine impulse: smooth ramp-up, peak, ramp-down.
         const u = t / burstDur;
@@ -2138,7 +2200,7 @@ class Creature extends Entity {
       } else if (this.propulsion === 'wriggle') {
         // Between strokes, wriggle keeps a faint sinusoidal background so the
         // body never fully stalls.
-        const u = (t - burstDur) / Math.max(0.0001, profile.cycle - burstDur);
+        const u = (t - burstDur) / Math.max(0.0001, effCycle - burstDur);
         thrustMul = profile.cruiseStrength * (0.55 + 0.45 * Math.sin(u * Math.PI * 2));
       }
     }
@@ -2177,6 +2239,24 @@ class Creature extends Entity {
     const v = Math.hypot(this.vx, this.vy);
     const mv = baseSpeed * burstClampBoost;
     if (v > mv) { this.vx = this.vx / v * mv; this.vy = this.vy / v * mv; }
+
+    // Unstick helper for dense plant/rock pockets.
+    this._stuckT = this._stuckT || 0;
+    if (len > this.r + 42 && drive > 0.55 && v < Math.max(10, this.maxSpeed * 0.18)) {
+      this._stuckT += dt;
+      if (this._stuckT > 0.75) {
+        const side = ((this.evadeBias || 1) >= 0) ? 1 : -1;
+        const px = -hy * side;
+        const py = hx * side;
+        const nudge = Math.max(22, this.maxSpeed * 0.2);
+        this.vx += hx * nudge * 0.65 + px * nudge;
+        this.vy += hy * nudge * 0.65 + py * nudge;
+        this.angle += side * 0.32;
+        this._stuckT = 0.15;
+      }
+    } else {
+      this._stuckT = Math.max(0, this._stuckT - dt * 1.4);
+    }
   }
 
   draw(ctx, camX, camY, w, h) {
@@ -2766,6 +2846,15 @@ const PLANT_TUNE = {
   SECONDARY_SPAWN_LEAF_MAX: 4,
   CREATURE_BRANCH_SLOWDOWN: 0.92,
   CREATURE_LEAF_SLOWDOWN: 0.95,
+  // Intra-structure branch spacing: branches from the same plant gently repel
+  // each other so they spread into an organic canopy instead of knotting.
+  SAME_STRUCTURE_SEG_REPEL_RADIUS: 18,
+  SAME_STRUCTURE_SEG_REPEL_FORCE: 92,
+  SAME_STRUCTURE_TIP_REPEL_RADIUS: 34,
+  SAME_STRUCTURE_TIP_REPEL_FORCE: 180,
+  SAME_STRUCTURE_ANGLE_SEPARATION: 0.95,
+  SAME_NODE_MIN_ANGLE: 0.62,
+  SAME_NODE_SPREAD_STIFFNESS: 6.2,
   CHUNK_EJECT_CYCLE_SECONDS: 20,
   CHUNK_MAGNETIC_DELAY: 1.5,
   // Deterministic tip catch: if a chunk reaches the connection radius at the
@@ -2789,6 +2878,7 @@ class PlantStructure {
     this.x = x; this.y = y;
     this.vx = 0; this.vy = 0;
     this.structureId = PlantStructure._nextId = (PlantStructure._nextId || 0) + 1;
+    this.colonyId = this.structureId;
     this.dead = false;
     this.scale = clamp(scale || 1, 1, 10);
     const R = rng || Math.random;
@@ -2981,11 +3071,16 @@ class PlantStructure {
       if (n.baseR && n.r < n.baseR) n.r = Math.min(n.baseR, n.r + dt * 0.45);
     }
 
+    this._enforceNodeBranchSpread(dt);
     for (const branch of this.branches) this._updateBranch(branch, dt, T_now, drift);
+    this._applyIntraBranchRepulsion(dt);
 
     this._updateInternalGrowth(dt, game);
     this._updateLeafGrowth(dt);
     this._updateTipInteractions(dt, game);
+    // Tip attraction can re-densify branches; run spacing again after it.
+    this._enforceNodeBranchSpread(dt * 0.8);
+    this._applyIntraBranchRepulsion(dt * 0.8);
     if (entities && entities.length) this._updateCreatureInteractions(dt, entities);
 
     // Leaf regen.
@@ -3070,6 +3165,116 @@ class PlantStructure {
     }
   }
 
+  _enforceNodeBranchSpread(dt) {
+    const minGapBase = PLANT_TUNE.SAME_NODE_MIN_ANGLE;
+    const stiff = PLANT_TUNE.SAME_NODE_SPREAD_STIFFNESS;
+    for (const node of this.plantNodes) {
+      if (!node || !node.branches || node.branches.length < 2) continue;
+      const list = node.branches.filter(b => !b._removed);
+      if (list.length < 2) continue;
+      list.sort((a, b) => a.originAngle - b.originAngle);
+      const n = list.length;
+      const minGap = Math.min(TAU / n * 0.86, minGapBase);
+
+      for (let i = 0; i < n; i++) {
+        const a = list[i];
+        const b = list[(i + 1) % n];
+        const aa = ((a.originAngle % TAU) + TAU) % TAU;
+        const bb = ((b.originAngle % TAU) + TAU) % TAU;
+        let gap = bb - aa;
+        if (gap <= 0) gap += TAU;
+        if (gap >= minGap) continue;
+
+        const deficit = minGap - gap;
+        const corr = deficit * stiff * dt;
+        a.originAngle -= corr * 0.5;
+        b.originAngle += corr * 0.5;
+      }
+
+      for (let i = 0; i < n; i++) {
+        const b = list[i];
+        b.originAngle = ((b.originAngle % TAU) + TAU) % TAU;
+      }
+    }
+  }
+
+  _applyIntraBranchRepulsion(dt) {
+    if (this.branches.length < 2) return;
+    const scaleMul = Math.pow(this.scale || 1, 0.35);
+    const segRadius = PLANT_TUNE.SAME_STRUCTURE_SEG_REPEL_RADIUS * scaleMul;
+    const tipRadius = PLANT_TUNE.SAME_STRUCTURE_TIP_REPEL_RADIUS * scaleMul;
+    const segR2 = segRadius * segRadius;
+    const tipR2 = tipRadius * tipRadius;
+
+    for (let i = 0; i < this.branches.length; i++) {
+      const a = this.branches[i];
+      if (!a || !a.segments.length) continue;
+      const aTip = a.segments[a.segments.length - 1];
+
+      for (let j = i + 1; j < this.branches.length; j++) {
+        const b = this.branches[j];
+        if (!b || !b.segments.length) continue;
+        const bTip = b.segments[b.segments.length - 1];
+
+        // Stronger repulsion at branch tips where visual knotting is worst.
+        let dx = bTip.x - aTip.x;
+        let dy = bTip.y - aTip.y;
+        let d2 = dx * dx + dy * dy;
+        if (d2 < tipR2 && d2 > 0.0001) {
+          const d = Math.sqrt(d2);
+          const nx = dx / d, ny = dy / d;
+          const falloff = 1 - d / tipRadius;
+          const push = PLANT_TUNE.SAME_STRUCTURE_TIP_REPEL_FORCE * falloff * dt;
+          aTip.vx -= nx * push; aTip.vy -= ny * push;
+          bTip.vx += nx * push; bTip.vy += ny * push;
+
+          // Slight angular uncurling for branches sharing the same node.
+          if (a.node === b.node && a.node) {
+            const cx = a.node.x, cy = a.node.y;
+            const aa = Math.atan2(aTip.y - cy, aTip.x - cx);
+            const bb = Math.atan2(bTip.y - cy, bTip.x - cx);
+            let diff = ((bb - aa + Math.PI * 3) % TAU) - Math.PI;
+            const turn = PLANT_TUNE.SAME_STRUCTURE_ANGLE_SEPARATION * falloff * dt;
+            if (diff >= 0) {
+              a.originAngle -= turn;
+              b.originAngle += turn;
+            } else {
+              a.originAngle += turn;
+              b.originAngle -= turn;
+            }
+          }
+        }
+
+        // Softer repulsion over branch segment bodies to prevent interweaving.
+        for (let saIdx = 0; saIdx < a.segments.length; saIdx++) {
+          const sa = a.segments[saIdx];
+          for (let sbIdx = 0; sbIdx < b.segments.length; sbIdx++) {
+            const sb = b.segments[sbIdx];
+            dx = sb.x - sa.x;
+            dy = sb.y - sa.y;
+            d2 = dx * dx + dy * dy;
+            if (d2 >= segR2 || d2 <= 0.0001) continue;
+
+            const d = Math.sqrt(d2);
+            const nx = dx / d, ny = dy / d;
+            const falloff = 1 - d / segRadius;
+            const push = PLANT_TUNE.SAME_STRUCTURE_SEG_REPEL_FORCE * falloff * dt;
+            sa.vx -= nx * push; sa.vy -= ny * push;
+            sb.vx += nx * push; sb.vy += ny * push;
+
+            // Small positional correction reduces visible overlap jitter.
+            const overlap = segRadius - d;
+            if (overlap > 0) {
+              const corr = overlap * 0.045;
+              sa.x -= nx * corr; sa.y -= ny * corr;
+              sb.x += nx * corr; sb.y += ny * corr;
+            }
+          }
+        }
+      }
+    }
+  }
+
   _updateInternalGrowth(dt, game) {
     for (const node of this.plantNodes) {
       if (!node.internalSlots.length) continue;
@@ -3149,6 +3354,7 @@ class PlantStructure {
       f.relinkIntent = 0;
       f._sourcePlant = this;
       f._sourcePlantId = this.structureId;
+      f._sourceColonyId = this.colonyId;
       f._sourceCooldown = 1.4;
       f._magneticDelay = PLANT_TUNE.CHUNK_MAGNETIC_DELAY; // delay before branch tips can attract this chunk
     }
@@ -3177,6 +3383,7 @@ class PlantStructure {
         // The chunk's sourcePlant pointer outlives the cooldown specifically so
         // we can enforce this rule for the chunk's entire lifetime.
         if (o._sourcePlant === this) continue;
+        if (o._sourceColonyId !== undefined && o._sourceColonyId === this.colonyId) continue;
         const dx = tip.x - o.x;
         const dy = tip.y - o.y;
         const d2 = dx * dx + dy * dy;
@@ -3216,7 +3423,11 @@ class PlantStructure {
   _tryGrabChunk(branch, chunk) {
     // Final guard: this structure may never consume chunks emitted from its
     // own node network, even if a caller forgets to prefilter candidates.
-    if (chunk && (chunk._sourcePlant === this || chunk._sourcePlantId === this.structureId)) return false;
+    if (chunk && (
+      chunk._sourcePlant === this ||
+      chunk._sourcePlantId === this.structureId ||
+      (chunk._sourceColonyId !== undefined && chunk._sourceColonyId === this.colonyId)
+    )) return false;
     if (branch.done || branch.leaves.length >= branch.maxLeaves) { branch.done = true; return false; }
     chunk.dead = true;
     this._growBranch(branch, Math.random);
@@ -3254,6 +3465,7 @@ class PlantStructure {
         if (!o || o.kind !== 'food' || o.dead || o.type !== 'plant') continue;
         // Secondary growth cannot consume chunks emitted by this same structure.
         if (o._sourcePlant === this) continue;
+        if (o._sourceColonyId !== undefined && o._sourceColonyId === this.colonyId) continue;
         const dx = o.x - seg.x, dy = o.y - seg.y;
         if (dx * dx + dy * dy > 12 * 12) continue;
         const side = Math.random() < 0.5 ? -1 : 1;
@@ -3295,6 +3507,10 @@ class PlantStructure {
       if (d <= PLANT_TUNE.TIP_CONNECT_RADIUS) {
         this.tipLinks.push({ other, a: bestA, b: bestB, rest: Math.max(10, d), t: 0 });
         other.tipLinks.push({ other: this, a: bestB, b: bestA, rest: Math.max(10, d), t: 0 });
+        // Joined structures share a colony id for chunk source-gating.
+        const mergedColony = Math.min(this.colonyId || this.structureId, other.colonyId || other.structureId);
+        this.colonyId = mergedColony;
+        other.colonyId = mergedColony;
         this.connectedToPlant = true;
         other.connectedToPlant = true;
         this._emitGrowthFx(bestA.x, bestA.y, 1.2, 'link');
@@ -4217,7 +4433,7 @@ class Director {
     this.spawnT = 0;
     this.foodT = 0;
     this.hazardT = 55 + rng() * 30; // first hazard plants appear after ~55–85s
-    this.plantT = 6 + rng() * 6;
+    this.plantT = 3.5 + rng() * 4.5;
     this.eventT = 35 + rng() * 25;
     this.currentEvent = null;
     this.eventDur = 0;
@@ -4266,8 +4482,29 @@ class Director {
     // creature spawn
     this.spawnT -= dt;
     if (this.spawnT <= 0 && this.game.creatures.filter(c => !c.dead).length < T.CREATURE_CAP) {
-      this.spawnCreatureNear(player);
-      this.spawnT = 0.7 + this.rng() * 0.6;
+      const localCreatureR = this.game.getActiveRadius() * 1.4;
+      const localCreatureR2 = localCreatureR * localCreatureR;
+      let localCreatureCount = 0;
+      let localHerbCount = 0;
+      for (let i = 0; i < this.game.creatures.length; i++) {
+        const c = this.game.creatures[i];
+        if (!c || c.dead) continue;
+        if (dist2(c.x, c.y, player.x, player.y) <= localCreatureR2) {
+          localCreatureCount++;
+          if (c.diet === 'herbivore') localHerbCount++;
+        }
+      }
+      const herbRatio = localCreatureCount > 0 ? (localHerbCount / localCreatureCount) : 0;
+      const preferHerb = herbRatio < 0.42;
+      this.spawnCreatureNear(player, 3, preferHerb ? 'herbivore' : null);
+
+      // Keep a healthy local population while exploring by topping up if the
+      // active neighborhood is sparse.
+      if (localCreatureCount < 22 && this.game.creatures.length < T.CREATURE_CAP) {
+        this.spawnCreatureNear(player, 2, 'herbivore');
+      }
+
+      this.spawnT = 0.42 + this.rng() * 0.38;
     }
 
     // Ensure there is periodic large predator presence around the player.
@@ -4281,9 +4518,9 @@ class Director {
     this.plantT -= dt;
     if (this.plantT <= 0) {
       const biome = biomeAt(Math.hypot(player.x, player.y));
-      if (['bloom', 'current', 'forest', 'shallow'].includes(biome.id) &&
+      if (['bloom', 'current', 'forest', 'shallow', 'vent'].includes(biome.id) &&
           this.game.foods.length < T.FOOD_CAP * 0.75) {
-        const count = 2 + Math.floor(this.rng() * 4);
+        const count = 4 + Math.floor(this.rng() * 5);
         for (let i = 0; i < count; i++) {
           const a = this.rng() * TAU;
           const minD = Math.max(340, this.game.getSpawnExclusionRadius() + 80);
@@ -4296,7 +4533,22 @@ class Director {
           if (f) { f.vx = (this.rng() - 0.5) * 12; f.vy = (this.rng() - 0.5) * 12; }
         }
       }
-      this.plantT = 5 + this.rng() * 8;
+
+      // If nearby plant structures are sparse, seed one directly so exploration
+      // reliably encounters node-based plants and not only loose chunks.
+      const localPlantR = this.game.getActiveRadius() * 1.5;
+      const localPlantR2 = localPlantR * localPlantR;
+      let localPlantCount = 0;
+      for (let i = 0; i < this.game.plants.length; i++) {
+        const pl = this.game.plants[i];
+        if (!pl || pl.dead) continue;
+        if (dist2(pl.x, pl.y, player.x, player.y) <= localPlantR2) localPlantCount++;
+      }
+      if (localPlantCount < 8 && this.game.plants.length < T.PLANT_CAP && this.rng() < 0.9) {
+        this.spawnPlantStructureNear(player);
+      }
+
+      this.plantT = 3.2 + this.rng() * 4.8;
     }
 
     // hazards
@@ -4322,7 +4574,7 @@ class Director {
     // Ambient food is disabled: food comes from creature kills and plant matter only.
   }
 
-  spawnCreatureNear(player, minRingAway = 5) {
+  spawnCreatureNear(player, minRingAway = 5, preferredDiet = null) {
     const a = this.rng() * TAU;
     const ringSize = RING_SIZE;
     const minD = minRingAway <= 0 ? 260 : Math.max(180, minRingAway * ringSize, this.game.getRenderRadius() + 260);
@@ -4332,7 +4584,14 @@ class Director {
     let y = player.y + Math.sin(a) * d;
     const local = biomeAt(Math.hypot(x, y));
     const ring = Math.max(1, Math.floor(Math.hypot(x, y) / RING_SIZE) + 1);
-    const pool = local.creatureTemplates.slice();
+    let pool = local.creatureTemplates.slice();
+    if (preferredDiet) {
+      const filtered = pool.filter(id => {
+        const t = CREATURE_TEMPLATES[id];
+        return t && t.diet === preferredDiet;
+      });
+      if (filtered.length) pool = filtered;
+    }
     const ringTier = this.game.getOutwardTierByRing(ring);
 
     // Director adjusts: if player is dominating, occasionally inject bigger predators
@@ -4462,6 +4721,26 @@ class Director {
     c.aggression = Math.min(2.2, c.aggression + 0.2 + this.game.getOutwardTierByRing(ring) * 0.04);
     this.game.creatures.push(c);
     this.game.ui.toast('APEX STIRS IN THE DISTANCE');
+  }
+
+  spawnPlantStructureNear(player) {
+    const a = this.rng() * TAU;
+    const minD = Math.max(this.game.getRenderRadius() + 220, 620);
+    const maxD = minD + 1000;
+    const d = minD + this.rng() * (maxD - minD);
+    const tx = player.x + Math.cos(a) * d;
+    const ty = player.y + Math.sin(a) * d;
+    const safe = this.game.findSafeSpawnPoint(
+      tx, ty,
+      180,
+      12,
+      16,
+      this.game.getSpawnExclusionRadius() * 0.55
+    );
+    if (!safe) return;
+    if (this.game.plants.length >= T.PLANT_CAP) return;
+    const scale = clamp(this.game.getOutwardScaleAt(safe.x, safe.y), 1, 10);
+    this.game.plants.push(new PlantStructure(safe.x, safe.y, this.rng, scale));
   }
 
   maybeSpawnHazard(player) {
@@ -5908,6 +6187,8 @@ class Game {
     const normalSpeed = Math.min(1, speed / 100);
     const motionPhase = (visual.motionPhase || 0) * TAU;
     const bend = Math.max(-2.2, Math.min(2.2, turnRate || 0));
+    // Larger bodies should animate at a slower stroke cadence.
+    const sizeFreqScale = clamp(1.12 - (visual._smoothR || 20) / 72, 0.46, 1.0);
 
     let halfFwd = visual._smoothR * elong;
     let halfLat = visual._smoothR;
@@ -5919,7 +6200,7 @@ class Game {
     let finFreq = 0;
 
     if (style === 'pulse') {
-      pulseFreq = swimTuning.pulseFreqBase + normalSpeed * swimTuning.pulseFreqSpeed;
+      pulseFreq = (swimTuning.pulseFreqBase + normalSpeed * swimTuning.pulseFreqSpeed) * sizeFreqScale;
       const pulsePhase = visual.time * pulseFreq * TAU + motionPhase;
       const pulseWave = Math.sin(pulsePhase);
       pulseKick = Math.max(0, pulseWave);
@@ -5927,12 +6208,12 @@ class Game {
       halfFwd *= 1 + pulseKick * swimTuning.pulseContractFwd - pulseRecover * 0.05;
       halfLat *= 1 - pulseKick * 0.10 + pulseRecover * 0.06;
     } else if (style === 'fin') {
-      finFreq = swimTuning.finFreqBase + normalSpeed * swimTuning.finFreqSpeed;
+      finFreq = (swimTuning.finFreqBase + normalSpeed * swimTuning.finFreqSpeed) * sizeFreqScale;
       const glidePhase = visual.time * finFreq * TAU + motionPhase;
       halfFwd *= 1 + normalSpeed * 0.04 + Math.sin(glidePhase) * 0.012;
       halfLat *= 1 - normalSpeed * 0.02 + Math.sin(glidePhase + HALF_PI) * 0.008;
     } else {
-      wriggleFreq = swimTuning.wriggleFreqBase + normalSpeed * swimTuning.wriggleFreqSpeed;
+      wriggleFreq = (swimTuning.wriggleFreqBase + normalSpeed * swimTuning.wriggleFreqSpeed) * sizeFreqScale;
       wriggleAmp = visual._smoothR * (swimTuning.wriggleAmpBase + normalSpeed * swimTuning.wriggleAmpSpeed);
       const wrigglePhase = visual.time * wriggleFreq * TAU + motionPhase;
       halfFwd *= 1 + Math.sin(wrigglePhase) * 0.012;
@@ -6690,7 +6971,7 @@ class Game {
     this.creatures = this.creatures.filter(c => !(c.dead && c.deathT > 240));
 
     // despawn very distant
-    const despawnR = Math.max(T.DESPAWN_RADIUS, this.getActiveRadius() + 650);
+    const despawnR = Math.max(T.DESPAWN_RADIUS, this.getActiveRadius() + 1300);
     const despawnSq = despawnR * despawnR;
     for (let i = this.creatures.length - 1; i >= 0; i--) {
       const c = this.creatures[i];
@@ -7331,6 +7612,7 @@ class Game {
         // Don't pull a chunk toward another chunk emitted by the same plant
         // it just left — they should disperse first.
         if (f._sourcePlant && f._sourcePlant === o._sourcePlant) continue;
+        if (f._sourceColonyId !== undefined && f._sourceColonyId === o._sourceColonyId) continue;
         const dx = o.x - f.x, dy = o.y - f.y;
         const d2 = dx*dx + dy*dy;
         if (d2 > cohR2 || d2 < 1) continue;
@@ -7369,10 +7651,31 @@ class Game {
       let cx = 0, cy = 0;
       for (const c of group) { cx += c.x; cy += c.y; c.dead = true; }
       cx /= group.length; cy /= group.length;
-      const scale = clamp(this.getOutwardScaleAt(cx, cy), 1, 10);
-      const plant = new PlantStructure(cx, cy, this.rng, scale);
-      this.plants.push(plant);
-      this.particles.burst(cx, cy, 8, { speed: 60, life: 0.5, r: 1.8, h: plant.hue, s: 70, l: 70 });
+      let nearest = null;
+      let nearestD2 = Infinity;
+      for (let pIdx = 0; pIdx < this.plants.length; pIdx++) {
+        const pl = this.plants[pIdx];
+        if (!pl || pl.dead) continue;
+        const d2 = dist2(cx, cy, pl.x, pl.y);
+        if (d2 < nearestD2) { nearestD2 = d2; nearest = pl; }
+      }
+      const minPlantDist = PLANT_TUNE.MIN_DISTANCE_BETWEEN_PLANTS;
+      if (nearest && nearestD2 < minPlantDist * minPlantDist) {
+        if (nearest.branches && nearest.branches.length > 0) {
+          let growBranch = nearest.branches[0];
+          for (let bi = 1; bi < nearest.branches.length; bi++) {
+            if (nearest.branches[bi].leaves.length < growBranch.leaves.length) growBranch = nearest.branches[bi];
+          }
+          nearest._growBranch(growBranch, nearest.rng || this.rng || Math.random);
+          nearest._emitGrowthFx(cx, cy, 1.1, 'sprout');
+        }
+        this.particles.burst(cx, cy, 6, { speed: 50, life: 0.45, r: 1.6, h: nearest ? nearest.hue : 115, s: 68, l: 68 });
+      } else {
+        const scale = clamp(this.getOutwardScaleAt(cx, cy), 1, 10);
+        const plant = new PlantStructure(cx, cy, this.rng, scale);
+        this.plants.push(plant);
+        this.particles.burst(cx, cy, 8, { speed: 60, life: 0.5, r: 1.8, h: plant.hue, s: 70, l: 70 });
+      }
       for (const c of group) seen.add(c);
     }
     // Decay cluster timers on chunks that drifted apart.
@@ -7568,6 +7871,11 @@ class Game {
       if (c.dead) continue;
 
       const minChunk = clamp(c.r * 0.18, 1.8, 16.0);
+      // Map physical size to a pseudo growth tier so larger creatures can
+      // naturally transition from chunk -> leaf -> node feeding even if their
+      // explicit growthLevel lags behind their body size.
+      const sizeTier = Math.max(0, Math.floor((c.r - 8) / 5));
+      const eatTier = Math.max(c.growthLevel || 0, sizeTier);
 
       if (c.diet === 'carnivore' || c.diet === 'omnivore') {
         const nearby = this.grid.query(c.x, c.y, c.r + 26, this._scratch);
@@ -7584,39 +7892,68 @@ class Game {
           this.particles.burst(e.x, e.y, 4, { speed: 60, life: 0.4, r: 1.5, h: 355, s: 80, l: 58 });
           break;
         }
+
+        // Opportunistic predation: nearby larger predators should actually
+        // convert contact into food pressure, not only rely on rare AI attack
+        // state transitions.
+        if ((c.hunger || 0) > 0.18) {
+          const nearbyPrey = this.grid.query(c.x, c.y, c.r + 18, this._scratch);
+          for (const p of nearbyPrey) {
+            if (!p || p.kind !== 'creature' || p === c || p.dead) continue;
+            if (p.isEscort || p.legendary) continue;
+            if (p.r > c.r * 0.92) continue;
+            const d = Math.hypot(p.x - c.x, p.y - c.y);
+            if (d > c.r + p.r + 4) continue;
+            if (c.attackCD > 0) continue;
+
+            const bite = c.biteDmg * (0.72 + Math.min(0.65, c.angry * 0.25));
+            p.takeDamage(bite, 'creature', this);
+            c.attackCD = Math.max(c.attackCD, 0.42);
+            c.hunger = Math.max(0, c.hunger - 0.06);
+            if (p.dead) {
+              this.consumeCreature(p);
+              c.hunger = Math.max(0, c.hunger - 0.22);
+              c.eatenMark = Math.min(1.2, c.eatenMark + 0.6);
+            }
+            break;
+          }
+        }
       }
 
       if (c.diet === 'herbivore' || c.diet === 'omnivore') {
         // Loose plant chunks (ejected from nodes / drifting in currents).
         const chunkGate = (window.GROWTH_THRESHOLDS && window.GROWTH_THRESHOLDS.plantChunkEat != null)
-          ? window.GROWTH_THRESHOLDS.plantChunkEat : 7;
-        if ((c.growthLevel || 0) >= chunkGate) {
-          const nearbyFood = this.grid.query(c.x, c.y, c.r + 22, this._scratch);
+          ? window.GROWTH_THRESHOLDS.plantChunkEat : 0;
+        if (eatTier >= chunkGate) {
+          const nearbyFood = this.grid.query(c.x, c.y, c.r + 58, this._scratch);
           for (const e of nearbyFood) {
             if (e.kind !== 'food' || e.dead || e.type !== 'plant') continue;
-            if (e.r < minChunk * 0.7) continue;
+            if (e.r < minChunk * 0.35) continue;
             const d = Math.hypot(e.x - c.x, e.y - c.y);
             if (d > c.r + e.r + 2) continue;
             e.dead = true;
-            c.hunger = Math.max(0, c.hunger - 0.30);
-            c.hp = Math.min(c.maxHP, c.hp + 2 + e.r * 1.2);
-            c.eatenMark = Math.min(1.2, c.eatenMark + 0.55);
-            c.growBy(1.8 + e.r * 0.7, this);
+            c.hunger = Math.max(0, c.hunger - 0.36);
+            c.hp = Math.min(c.maxHP, c.hp + 2.6 + e.r * 1.35);
+            c.eatenMark = Math.min(1.2, c.eatenMark + 0.62);
+            c.growBy(2.2 + e.r * 0.9, this);
             this.particles.burst(e.x, e.y, 3, { speed: 45, life: 0.35, r: 1.3, h: e.hue, s: 70, l: 65 });
             break;
           }
         }
 
+        // Lower bite-size gate on structures so large bodies can still nibble
+        // leaves and eventually nodes instead of being blocked by minChunk.
+        const minPlantBite = clamp(c.r * 0.10, 1.0, 8.0);
         for (const pl of this.plants) {
           if (pl.dead) continue;
           const d2 = dist2(c.x, c.y, pl.x, pl.y);
-          if (d2 > 280 * 280) continue;
-          const gain = pl.eatFrom(c.x, c.y, c.r, this, minChunk, c.vx, c.vy, c.growthLevel || 0);
+          if (d2 > 360 * 360) continue;
+          const gain = pl.eatFrom(c.x, c.y, c.r, this, minPlantBite, c.vx, c.vy, eatTier);
           if (gain > 0) {
-            c.hunger = Math.max(0, c.hunger - gain * 0.03 * dt * 8);
-            c.hp = Math.min(c.maxHP, c.hp + gain * 0.02 * dt * 8);
-            c.eatenMark = Math.min(1.2, c.eatenMark + 0.5);
-            c.growBy(gain * 0.9, this);
+            c.hunger = Math.max(0, c.hunger - gain * 0.035 * dt * 8);
+            c.hp = Math.min(c.maxHP, c.hp + gain * 0.024 * dt * 8);
+            c.eatenMark = Math.min(1.2, c.eatenMark + 0.6);
+            c.growBy(gain * 1.02, this);
             break;
           }
         }
@@ -7811,6 +8148,43 @@ class Game {
     return pd2 < md2 * 1.15 ? plant : meat;
   }
 
+  findMateTargetForCreature(creature, r = 620) {
+    if (!creature || creature.dead) return null;
+    const minGrowthLevel = (window.GROWTH_THRESHOLDS && window.GROWTH_THRESHOLDS.npcMateMin) || 3;
+    if ((creature.growthLevel || 0) < minGrowthLevel) return null;
+    if (creature.mateCD > 0) return null;
+
+    const nearby = this.grid.query(creature.x, creature.y, r, this._scratch);
+    let best = null;
+    let bestScore = Infinity;
+    for (let i = 0; i < nearby.length; i++) {
+      const o = nearby[i];
+      if (!o || o.kind !== 'creature' || o === creature || o.dead) continue;
+      if (o.isEscort || o.legendary) continue;
+      if (o.speciesTag !== creature.speciesTag) continue;
+      if ((o.growthLevel || 0) < minGrowthLevel) continue;
+      if (o.mateCD > 0) continue;
+      const ratio = o.r / Math.max(1, creature.r);
+      if (ratio < 0.45 || ratio > 2.4) continue;
+
+      const d2 = dist2(o.x, o.y, creature.x, creature.y);
+      // Prefer closer mates with lower local competition.
+      let crowd = 0;
+      const nearMate = this.grid.query(o.x, o.y, 140, this._scratch);
+      for (let j = 0; j < nearMate.length; j++) {
+        const n = nearMate[j];
+        if (!n || n.kind !== 'creature' || n.dead || n === creature || n === o) continue;
+        if (n.speciesTag === creature.speciesTag) crowd++;
+      }
+      const score = d2 * (1 + crowd * 0.12);
+      if (score < bestScore) {
+        bestScore = score;
+        best = o;
+      }
+    }
+    return best;
+  }
+
   // ── NPC same-species reproduction ─────────────────────────────────────────
   // Periodically scan for two adjacent same-species creatures that are both
   // grown, healthy, and off-cooldown. Spawn one offspring matched to their
@@ -7908,6 +8282,26 @@ class Game {
       const threatR = rock.maxR + radius + 70;
       if (d2 > threatR * threatR) continue;
       if (d2 < bestD2) { bestD2 = d2; best = rock; }
+    }
+    // If no nearby rock threat, avoid dense plant structures too.
+    if (!best) {
+      for (let i = 0; i < this.plants.length; i++) {
+        const pl = this.plants[i];
+        if (!pl || pl.dead) continue;
+        const dx = pl.x - x;
+        const dy = pl.y - y;
+        const d2 = dx * dx + dy * dy;
+        const plantThreatR = 86 + radius + Math.min(90, (pl.branches ? pl.branches.length : 0) * 7);
+        if (d2 > plantThreatR * plantThreatR) continue;
+        if (d2 < bestD2) {
+          bestD2 = d2;
+          best = {
+            x: pl.x,
+            y: pl.y,
+            maxR: plantThreatR - radius,
+          };
+        }
+      }
     }
     if (!best) return { x: nx, y: ny };
 

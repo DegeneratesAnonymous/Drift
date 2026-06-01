@@ -412,11 +412,14 @@ window.DriftCreatures.getProceduralSpine = function (creature, center, approxR) 
   var rawLen = Math.sqrt(rawFx * rawFx + rawFy * rawFy) || 1;
   rawFx /= rawLen;
   rawFy /= rawLen;
-  var prevFacing = creature._renderFacing || { x: rawFx, y: rawFy };
-  // Heavier smoothing damps heading noise from rapid turn updates.
-  var facingSmooth = creature.isPlayer ? 0.955 : 0.945;
-  var fx = prevFacing.x * facingSmooth + rawFx * (1 - facingSmooth);
-  var fy = prevFacing.y * facingSmooth + rawFy * (1 - facingSmooth);
+  // Use creature.facing directly as the projection axis. It is already the
+  // exact heading that placed the body nodes this frame (and the heading
+  // solver in game.js rate-limits + smooths it). Any additional smoothing
+  // here lags the projection behind the actual node positions, which makes
+  // thin bodies render as if folded back on themselves — the "tail loop".
+  var fx = rawFx;
+  var fy = rawFy;
+  creature._renderFacing = { x: fx, y: fy };
   var flen = Math.sqrt(fx * fx + fy * fy) || 1;
   fx /= flen;
   fy /= flen;
@@ -442,6 +445,29 @@ window.DriftCreatures.getProceduralSpine = function (creature, center, approxR) 
   var radii = [];
   var range = Math.max(4, maxS - minS);
 
+  // Direct spine-level wiggle. Style and source-velocity determine cadence;
+  // amplitude tapers to 0 at midbody so the head section stays rigid. This
+  // is decoupled from node-level wave so the visible motion doesn't depend on
+  // the noisy weighted-mean aggregation across body nodes.
+  var visualStyle = (creature.genome && creature.genome.movement && creature.genome.movement.style) || 'fin';
+  var srcV = creature.sourceCreature
+    ? Math.sqrt((creature.sourceCreature.vx || 0) * (creature.sourceCreature.vx || 0) +
+                (creature.sourceCreature.vy || 0) * (creature.sourceCreature.vy || 0))
+    : 0;
+  var normSpeed = Math.min(1, srcV / 40);
+  var spineFreq, spineAmp;
+  if (visualStyle === 'wriggle') {
+    spineFreq = 2.4 + normSpeed * 2.0;
+    spineAmp  = approxR * (0.18 + normSpeed * 0.18);
+  } else if (visualStyle === 'pulse') {
+    spineFreq = 1.6 + normSpeed * 1.0;
+    spineAmp  = approxR * (0.05 + normSpeed * 0.08);
+  } else { // fin / glide
+    spineFreq = 1.8 + normSpeed * 1.4;
+    spineAmp  = approxR * (0.08 + normSpeed * 0.12);
+  }
+  var spineTNow = creature.time || 0;
+
   for (var si = 0; si < segCount; si++) {
     var t = segCount <= 1 ? 0 : si / (segCount - 1);
     var sTarget = minS + range * t;
@@ -460,40 +486,40 @@ window.DriftCreatures.getProceduralSpine = function (creature, center, approxR) 
       var w2 = 1 / (0.35 + ds2);
       lAbs += Math.abs(samples[k].l - lMean) * w2;
     }
-    var radius = Math.max(approxR * 0.18, (wsum > 0 ? lAbs / wsum : approxR * 0.35));
+    // Body-half-width at this slice. Raise the floor so small creatures still
+    // render as visible silhouettes instead of one-pixel ribbons that get
+    // dwarfed by their attached fins/tails.
+    var radius = Math.max(approxR * 0.34, (wsum > 0 ? lAbs / wsum : approxR * 0.45));
     var profile = Math.sin(Math.PI * t);
-    radius *= 0.42 + profile * 0.78;
-    // Lateral offset tapers to 0 at the head end to prevent face wobble.
+    radius *= 0.55 + profile * 0.75;
+    // Lateral offset tapers to 0 well before the head so the face section is
+    // locked to the body's facing axis. The node-aggregated lMean is kept
+    // small (it has noise from wave-displaced nodes); the visible motion
+    // comes from the deterministic spineWiggle below.
     // t=0 = tail (full offset), t=1 = head (zero offset).
-    var lateralWeight = 0.22 * Math.max(0, 1 - Math.max(0, t - 0.45) / 0.55);
+    var lateralEnvelope = t > 0.55 ? 0 : Math.pow(1 - t / 0.55, 1.2);
+    var lateralWeight = lateralEnvelope * 0.18;
+    // Deterministic spine wiggle — travels head→tail so the tail end leads
+    // the bend, like a fish stroke. Phase offset on creature.idNumber so a
+    // group of fish doesn't undulate in lock-step.
+    var phaseOffset = (creature.idNumber || 0) * 0.7;
+    var spinePhase = spineTNow * spineFreq * Math.PI * 2 - (1 - t) * Math.PI * 1.7 + phaseOffset;
+    var spineWiggle = Math.sin(spinePhase) * spineAmp * lateralEnvelope;
+    var totalLat = lMean * lateralWeight + spineWiggle;
     points.push({
-      x: center.x + fx * sTarget + sx * (lMean * lateralWeight),
-      y: center.y + fy * sTarget + sy * (lMean * lateralWeight)
+      x: center.x + fx * sTarget + sx * totalLat,
+      y: center.y + fy * sTarget + sy * totalLat
     });
     radii.push(radius);
   }
 
-  var speed = 0;
-  if (creature.sourceCreature) {
-    speed = Math.sqrt((creature.sourceCreature.vx || 0) * (creature.sourceCreature.vx || 0) + (creature.sourceCreature.vy || 0) * (creature.sourceCreature.vy || 0));
-  }
-  // Higher floor (0.75) for denser temporal smoothing; less responsive to node noise.
-  var smooth = Math.max(0.75, Math.min(0.88, 0.86 - speed * 0.003));
-  var prev = creature._spineSmoothing;
-  if (prev && prev.points && prev.points.length === points.length) {
-    for (var s = 0; s < points.length; s++) {
-      points[s].x = prev.points[s].x * smooth + points[s].x * (1 - smooth);
-      points[s].y = prev.points[s].y * smooth + points[s].y * (1 - smooth);
-      radii[s] = prev.radii[s] * smooth + radii[s] * (1 - smooth);
-    }
-  }
-
-  dcConstrainSpine(points, Math.max(4, range / Math.max(1, segCount - 1)), 0.38);
-
-  creature._spineSmoothing = {
-    points: points.map(function (p) { return { x: p.x, y: p.y }; }),
-    radii: radii.slice()
-  };
+  // Body nodes are placed kinematically each frame (uniform ellipse +
+  // small wave displacement), so the sampled spine is already at uniform
+  // segmentLength with smooth bend. Skip the iterative pin-tail / pin-head /
+  // angle-clamp solver — its passes over a wave-displaced sample produce
+  // small per-iteration drifts that compound into per-frame tangent flips
+  // at the head/tail tips. Long-bodied fish were getting their nose anchor
+  // rotated 180° between frames as a result.
 
   var tangents = [];
   var left = [];
