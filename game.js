@@ -8,7 +8,6 @@ window.DRIFT_USE_SOFT_CREATURES = true;
 // Disable prototype authority: NPC visuals are purely cosmetic proxies driven
 // by the legacy simulation.  When true, NPCs run autonomous creature-lab AI
 // which causes them to shoot across the map and swim independently of the game.
-window.DRIFT_USE_SOFT_PROTOTYPE_AUTHORITY = false;
 
 (() => {
 
@@ -747,6 +746,97 @@ const MUTATIONS = [
 const MUTATION_BY_ID = Object.fromEntries(MUTATIONS.map(m => [m.id, m]));
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PROPULSION PROFILES — four ways creatures move themselves through water.
+//   burst   → charge silently, fire a short hard impulse, then coast
+//   glide   → continuous low-effort cruise, very little drag
+//   wriggle → sinusoidal tail-driven thrust, steady cadence
+//   fin     → continuous steady thrust, the closest analogue to "powered swim"
+// All profiles share a unified turn-then-thrust physics; only the thrust
+// envelope, drag, and turn rate differ. Speed/accel/turn are further scaled by
+// `growthLevel` (slower at level 0) and `bonusComplexity` (DNA upgrades).
+// ─────────────────────────────────────────────────────────────────────────────
+const PROPULSION_PROFILES = {
+  burst: {
+    // Short cycle keeps velocity from fully dropping between strikes (which
+    // previously made the visual heading mode-switch every coast → reading as
+    // a slow-FPS "flip"). A small cruise term means the creature still glides
+    // forward between strikes instead of fully stopping.
+    cycle: 1.05, burstFrac: 0.28,
+    burstStrength: 3.6, cruiseStrength: 0.18,
+    turnRate: 2.4, drag: 0.75, slipDamp: 4.0,
+  },
+  glide: {
+    cycle: 0, burstFrac: 0,
+    burstStrength: 1.0, cruiseStrength: 0.9,
+    turnRate: 3.0, drag: 1.05, slipDamp: 3.5,
+  },
+  wriggle: {
+    cycle: 0.55, burstFrac: 0.55,
+    burstStrength: 1.7, cruiseStrength: 0.7,
+    turnRate: 4.2, drag: 1.4, slipDamp: 5.5,
+  },
+  fin: {
+    cycle: 0, burstFrac: 0,
+    burstStrength: 1.0, cruiseStrength: 1.05,
+    turnRate: 5.0, drag: 1.4, slipDamp: 5.0,
+  },
+};
+
+const TEMPLATE_PROPULSION = {
+  drifter:      'glide',
+  grazer:       'glide',
+  swarmer:      'wriggle',
+  darter:       'burst',
+  small_hunter: 'fin',
+  ambusher:     'burst',
+  territorial:  'fin',
+  scavenger:    'glide',
+  armored:      'fin',
+  apex:         'wriggle',
+  parasite:     'wriggle',
+};
+
+// Growth-level + DNA scaling. Level 0 = visibly slower than adult but still
+// clearly swimming (0.72×); each level adds ~6% and each bonusComplexity
+// (DNA-equivalent upgrade) adds 4%. Caps around ~1.3× at high growth.
+function creatureGrowthMul(c) {
+  const lv = (c && c.growthLevel) || 0;
+  const dna = (c && c.bonusComplexity) || 0;
+  return 0.72 + lv * 0.06 + dna * 0.04;
+}
+
+// Centralized growth-level thresholds, exposed on `window` so the dev menu
+// can mutate them at runtime and so the upcoming plant system can read the
+// same values (chunk-eat tier, leaf-eat tier, etc.).
+window.GROWTH_THRESHOLDS = window.GROWTH_THRESHOLDS || {
+  npcMateMin:      3, // NPC needs this growth level before reproducing
+  plantChunkEat:   7, // future plant system: growth needed to consume chunks
+  plantLeafEat:    3, // future plant system: growth needed to consume leaves
+  plantNodeEat:    7, // future plant system: growth needed to consume nodes
+  branchPushable:  3, // future plant system: branch tier that becomes pushable
+  subbranchTier:   3, // future plant system: tier above which subbranches can spawn
+};
+
+// Maps the player's creator body-shape choice to a creature template so
+// hatched offspring/escorts share the player's species archetype. Diet is
+// honored where possible by picking a matching herbivore/carnivore variant.
+function templateForPlayerSpecies(p) {
+  const body = (p && p.creatorBody) || 'round';
+  const diet = (p && p.diet) || 'omnivore';
+  const carnivore = diet === 'carnivore';
+  // round → grazer / territorial
+  // oval  → swarmer / darter
+  // long  → apex / parasite (small) — use small_hunter for carnivore
+  // soft  → drifter (fits both diets)
+  let id;
+  if (body === 'long')      id = carnivore ? 'small_hunter' : 'grazer';
+  else if (body === 'oval') id = carnivore ? 'darter'       : 'swarmer';
+  else if (body === 'soft') id = 'drifter';
+  else /* round */          id = carnivore ? 'territorial'  : 'grazer';
+  return CREATURE_TEMPLATES[id] || CREATURE_TEMPLATES.drifter;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CREATURE TEMPLATES — base archetypes; visuals & stats roll procedurally
 // ─────────────────────────────────────────────────────────────────────────────
 const CREATURE_TEMPLATES = {
@@ -923,6 +1013,15 @@ class Player extends Entity {
     this.speciesTag = 'round:omnivore';
     this.herbivoreRegen = false;
     this.starveSizeFloorMul = 0.58;
+    // Player shares the creature growth-level mechanic: starts at 0, advances
+    // as the player gains size. Drives speed/accel/turn scaling via
+    // creatureGrowthMul() — same formula NPCs use.
+    this.growthLevel = 0;
+    this.bonusComplexity = 0;
+    // Player uses 'fin' propulsion conceptually (steady continuous swim).
+    // Movement code reads stats directly rather than the profile, but having
+    // the field keeps the player consistent with creature data.
+    this.propulsion = 'fin';
     this.eatTarget = null;
     this.eatTimer = 0;
     this.eatDuration = 0;
@@ -948,10 +1047,27 @@ class Player extends Entity {
     this.escortB = null;       // mother
   }
 
-  get speed()      { return T.PLAYER_MAX_SPEED * this.stats.speedMul; }
-  get accel()      { return T.PLAYER_ACCEL * this.stats.accelMul; }
+  // Speed/accel are scaled by the same growth-mul NPCs use, so a level-0
+  // player is visibly sluggish and grows into their full ability — matching
+  // the creature growth mechanic.
+  get speed()      { return T.PLAYER_MAX_SPEED * this.stats.speedMul * creatureGrowthMul(this); }
+  get accel()      { return T.PLAYER_ACCEL * this.stats.accelMul * creatureGrowthMul(this); }
   get detection()  { return T.DETECTION_BASE * this.stats.detectionMul; }
   get biteDamage() { return T.PLAYER_BITE_DAMAGE * this.stats.biteMul * (1 + (this.r - T.PLAYER_START_SIZE) * 0.04); }
+
+  // Player growth-level mirrors how NPCs track it: based on size relative to
+  // start. ~1.25 size units per level, capped at 9. Called every frame.
+  _refreshPlayerGrowthLevel() {
+    const lv = Math.max(0, Math.min(9,
+      Math.floor((this.r - T.PLAYER_START_SIZE) / 1.25)));
+    if (lv !== this.growthLevel) {
+      const grew = lv > this.growthLevel;
+      this.growthLevel = lv;
+      if (grew) this.growthPulse = Math.min(1.4, (this.growthPulse || 0) + 0.5);
+    }
+    // DNA/mutation bonus mirrors NPC bonusComplexity: count of mutations.
+    this.bonusComplexity = (this.mutations && this.mutations.length) || 0;
+  }
 
   applyMutation(m) {
     if (this.mutations.includes(m.id)) return;
@@ -979,6 +1095,7 @@ class Player extends Entity {
 
   update(dt, game) {
     if (this.dead) return;
+    this._refreshPlayerGrowthLevel();
     this.totalTime += dt;
     this.timeSinceDamage += dt;
     this.dashCD = Math.max(0, this.dashCD - dt);
@@ -1081,16 +1198,6 @@ class Player extends Entity {
       const tr = T.PLAYER_TURN_RATE * this.stats.turnMul;
       this.angle += clamp(d, -tr * dt, tr * dt);
     }
-    // spine-bend physics
-    if (this._spinePrevAngle === undefined) this._spinePrevAngle = this.angle;
-    let _spDelta = this.angle - this._spinePrevAngle;
-    if (_spDelta > Math.PI) _spDelta -= TAU;
-    if (_spDelta < -Math.PI) _spDelta += TAU;
-    this._spinePrevAngle = this.angle;
-    const _pBendTarget = clamp(_spDelta / Math.max(0.008, dt) * 0.055, -0.85, 0.85);
-    this._bendMid  = lerp(this._bendMid  || 0, _pBendTarget, Math.min(1, dt * 5.5));
-    this._bendTail = lerp(this._bendTail || 0, this._bendMid, Math.min(1, dt * 3.2));
-
     // spine-bend physics
     if (this._spinePrevAngle === undefined) this._spinePrevAngle = this.angle;
     let _spDelta = this.angle - this._spinePrevAngle;
@@ -1545,6 +1652,10 @@ class Creature extends Entity {
     this.evadeBias = rng() < 0.5 ? -1 : 1;
     this.growthLevel = 0;
     this.bonusComplexity = 0;
+    this.propulsion = TEMPLATE_PROPULSION[template.id] || 'glide';
+    this._propulsionT = rng() * (PROPULSION_PROFILES[this.propulsion].cycle || 1.0);
+    // NPC mating cooldown (seconds). 0 = ready.
+    this.mateCD = 0;
 
     this._ensureCoreAnatomy(rng);
     this._refreshGrowthLevel(rng, true);
@@ -1694,22 +1805,8 @@ class Creature extends Entity {
     this.x += this.vx * dt;
     this.y += this.vy * dt;
 
-    if (Math.hypot(this.vx, this.vy) > 5) {
-      const t = Math.atan2(this.vy, this.vx);
-      const d = angDelta(this.angle, t);
-      const turnRate = (2.6 - clamp(this.r / 42, 0, 0.95)) * dt;
-      this.angle += clamp(d, -turnRate, turnRate);
-    }
-    // spine-bend physics
-    if (this._spinePrevAngle === undefined) this._spinePrevAngle = this.angle;
-    let _cSpDelta = this.angle - this._spinePrevAngle;
-    if (_cSpDelta > Math.PI) _cSpDelta -= TAU;
-    if (_cSpDelta < -Math.PI) _cSpDelta += TAU;
-    this._spinePrevAngle = this.angle;
-    const _cBendTarget = clamp(_cSpDelta / Math.max(0.008, dt) * 0.055, -0.85, 0.85);
-    this._bendMid  = lerp(this._bendMid  || 0, _cBendTarget, Math.min(1, dt * 4.5));
-    this._bendTail = lerp(this._bendTail || 0, this._bendMid, Math.min(1, dt * 2.8));
-
+    // Heading is fully driven in act(); no post-update angle nudging needed.
+    // (Collision knockback adjusts velocity; the next act() reconciles heading.)
     // spine-bend physics
     if (this._spinePrevAngle === undefined) this._spinePrevAngle = this.angle;
     let _cSpDelta = this.angle - this._spinePrevAngle;
@@ -1868,7 +1965,7 @@ class Creature extends Entity {
 
     switch (this.state) {
       case 'wander': {
-        this.wanderAngle += (Math.random() - 0.5) * 1.2 * dt;
+        this.wanderAngle += (Math.random() - 0.5) * 0.5 * dt;
         // flock pull
         if (this.flockCount > 0) {
           const cx = this.flockX / this.flockCount, cy = this.flockY / this.flockCount;
@@ -1996,28 +2093,89 @@ class Creature extends Entity {
     goalX = avoid.x;
     goalY = avoid.y;
 
-    // steer toward goal
+    // ─ Propulsion physics ─────────────────────────────────────────────────
+    // Unified model for every creature: turn-then-thrust along the heading
+    // with anisotropic drag. The propulsion profile only changes thrust
+    // envelope, drag, and turn rate.
+    const profile = PROPULSION_PROFILES[this.propulsion] || PROPULSION_PROFILES.glide;
+    const growthMul = creatureGrowthMul(this);
+    const baseSpeed = this.maxSpeed * growthMul;
+    const baseAccel = this.accel * growthMul;
+
+    // Arrival damping — ease off when nearing the goal so fast creatures
+    // don't overshoot and have to U-turn (the previous "spinning" bug).
     let dx = goalX - this.x, dy = goalY - this.y;
     const len = Math.hypot(dx, dy);
-    if (len > 0.1) { dx /= len; dy /= len; }
-    const a = this.accel * drive;
-    this.vx += dx * a * dt;
-    this.vy += dy * a * dt;
+    if (this.state !== 'flee') {
+      const arrival = this.r + 28;
+      if (len < arrival) drive *= Math.max(0.18, len / arrival);
+    }
 
-    // friction + gentle float drift
-    const fr = Math.max(0, 1 - 2.2 * dt);
+    // Turn heading toward the goal at a profile-specific rate. Scale by
+    // current speed so near-stopped fish can't pivot faster than they swim.
+    if (len > 0.5) {
+      dx /= len; dy /= len;
+      const goalAngle = Math.atan2(dy, dx);
+      const aDelta = angDelta(this.angle, goalAngle);
+      const sp = Math.hypot(this.vx, this.vy);
+      const sizeFactor = 1 - clamp(this.r / 42, 0, 0.95) * 0.45;
+      const speedScale = clamp(0.35 + sp / Math.max(12, baseSpeed * 0.6), 0.35, 1);
+      const turnRate = profile.turnRate * sizeFactor * speedScale * (0.7 + growthMul * 0.6);
+      this.angle += clamp(aDelta, -turnRate * dt, turnRate * dt);
+    }
+
+    // Propulsion envelope — produces a thrust multiplier from the profile.
+    this._propulsionT = (this._propulsionT || 0) + dt;
+    let thrustMul = profile.cruiseStrength;
+    if (profile.cycle > 0) {
+      const t = this._propulsionT % profile.cycle;
+      const burstDur = profile.cycle * profile.burstFrac;
+      if (t < burstDur) {
+        // Half-sine impulse: smooth ramp-up, peak, ramp-down.
+        const u = t / burstDur;
+        const env = Math.sin(u * Math.PI);
+        thrustMul = profile.cruiseStrength + (profile.burstStrength - profile.cruiseStrength) * env;
+      } else if (this.propulsion === 'wriggle') {
+        // Between strokes, wriggle keeps a faint sinusoidal background so the
+        // body never fully stalls.
+        const u = (t - burstDur) / Math.max(0.0001, profile.cycle - burstDur);
+        thrustMul = profile.cruiseStrength * (0.55 + 0.45 * Math.sin(u * Math.PI * 2));
+      }
+    }
+    // Predators leaning into a strike push a little harder.
+    if (this.state === 'attack' || this.state === 'hunt' || this.state === 'huntCreature') {
+      thrustMul *= 1.15;
+    }
+
+    // Thrust along heading, gated by alignment so creatures don't accelerate
+    // sideways while mid-turn.
+    const hx = Math.cos(this.angle), hy = Math.sin(this.angle);
+    const headingAlign = len > 0.5 ? Math.max(0, dx * hx + dy * hy) : 1;
+    const thrust = baseAccel * drive * thrustMul * (0.35 + 0.65 * headingAlign);
+    this.vx += hx * thrust * dt;
+    this.vy += hy * thrust * dt;
+
+    // Lateral (sideways) slip damping — water resists perpendicular motion.
+    const lateralV = this.vx * -hy + this.vy * hx;
+    const slipDamp = Math.min(1, profile.slipDamp * dt);
+    this.vx -= -hy * lateralV * slipDamp;
+    this.vy -=  hx * lateralV * slipDamp;
+
+    // Forward drag.
+    const fr = Math.max(0, 1 - profile.drag * dt);
     this.vx *= fr; this.vy *= fr;
-    // subtle ambient drift
-    this.vx += Math.sin(this.wanderAngle * 1.7 + this.stateT) * 1.0 * dt;
-    this.vy += Math.cos(this.wanderAngle * 1.3 + this.stateT * 0.9) * 1.0 * dt;
 
+    // Environmental current.
     const cur = game.getCurrentVectorAt(this.x, this.y);
     this.vx += cur.x * dt * 0.2;
     this.vy += cur.y * dt * 0.2;
 
-    // clamp speed
+    // Speed clamp — burst lets a creature briefly exceed cruise speed. Drive
+    // already attenuates thrust, so it should NOT also clamp max speed (that
+    // double-penalized wandering creatures into a near-frozen crawl).
+    const burstClampBoost = (this.propulsion === 'burst' && thrustMul > 1.5) ? 1.45 : 1.0;
     const v = Math.hypot(this.vx, this.vy);
-    const mv = this.maxSpeed * drive;
+    const mv = baseSpeed * burstClampBoost;
     if (v > mv) { this.vx = this.vx / v * mv; this.vy = this.vy / v * mv; }
   }
 
@@ -2365,6 +2523,7 @@ class Food extends Entity {
     if (this.linkCooldown > 0) this.linkCooldown = Math.max(0, this.linkCooldown - dt);
     if (this.relinkIntent > 0) this.relinkIntent = Math.max(0, this.relinkIntent - dt);
     if (this._magneticDelay > 0) this._magneticDelay = Math.max(0, this._magneticDelay - dt);
+    if (this._sourceCooldown > 0) this._sourceCooldown = Math.max(0, this._sourceCooldown - dt);
     if (this.links && this.links.size > 0) {
       for (const o of this.links) {
         if (!o || o.dead || o === this) this.links.delete(o);
@@ -2579,21 +2738,26 @@ class PartShard extends Entity {
 // r, baseR, hp, maxHP, parent}` so renderer/AI/save code stays compatible.
 
 const PLANT_TUNE = {
-  CLUSTER_REQUIRED_CHUNKS: 7,
-  CLUSTER_RADIUS: 22,
-  CLUSTER_REQUIRED_TIME: 2.5,
+  // Five close plant chunks fuse into a new PlantStructure after a short
+  // cohesion period. Tuned permissive so drifting plant matter actually forms
+  // new plants in practice — the previous 7-chunk gate was too strict.
+  CLUSTER_REQUIRED_CHUNKS: 5,
+  CLUSTER_RADIUS: 44,
+  CLUSTER_REQUIRED_TIME: 1.2,
   STARTING_BRANCH_COUNT: 3,
   STARTING_LEAVES_PER_BRANCH: 1,
-  MAX_MAIN_BRANCH_LEAVES: 5,
-  MAX_SECONDARY_BRANCH_LEAVES: 3,
+  // Maximum branch length, in (segment+leaf) units. Per spec: a branch caps
+  // at length 7. Sub-branches stay shorter so the silhouette stays readable.
+  MAX_MAIN_BRANCH_LEAVES: 7,
+  MAX_SECONDARY_BRANCH_LEAVES: 4,
   SEGMENT_LENGTH: 16,
   LEAF_BASE_R: 10,
   NODE_BASE_R: 9,
   BASE_GROWTH_RATE: 0.08,
   INTERNAL_CHUNK_EJECTION_FORCE: 42,
-  BRANCH_ATTRACTION_RADIUS: 64,
-  BRANCH_ATTRACTION_STRENGTH: 38,
-  BRANCH_MAX_ATTRACTION_FORCE: 100,
+  BRANCH_ATTRACTION_RADIUS: 100,
+  BRANCH_ATTRACTION_STRENGTH: 48,
+  BRANCH_MAX_ATTRACTION_FORCE: 130,
   BRANCH_TIP_CONNECTION_RADIUS: 16,
   TIP_TO_TIP_ATTRACTION_RADIUS: 80,
   TIP_TO_TIP_ATTRACTION_STRENGTH: 26,
@@ -2603,9 +2767,12 @@ const PLANT_TUNE = {
   CREATURE_BRANCH_SLOWDOWN: 0.92,
   CREATURE_LEAF_SLOWDOWN: 0.95,
   CHUNK_EJECT_CYCLE_SECONDS: 20,
-  CHUNK_MAGNETIC_DELAY: 3.0,
-  BRANCH_GRAB_CHANCE: 0.35,
-  BRANCH_GRAB_COOLDOWN: 8,
+  CHUNK_MAGNETIC_DELAY: 1.5,
+  // Deterministic tip catch: if a chunk reaches the connection radius at the
+  // branch tip, that branch grows. Cooldown still paces consecutive grabs so
+  // a branch can't gain length faster than its sway period.
+  BRANCH_GRAB_CHANCE: 1.0,
+  BRANCH_GRAB_COOLDOWN: 2.5,
   LEAF_PUSH_FORCE: 240,
   ROCK_STICK_DAMP: 0.82,
   PLANT_SPAWN_RADIUS_MULTIPLIER: 2.5,
@@ -2620,6 +2787,8 @@ const PLANT_TUNE = {
 class PlantStructure {
   constructor(x, y, rng, scale = 1) {
     this.x = x; this.y = y;
+    this.vx = 0; this.vy = 0;
+    this.structureId = PlantStructure._nextId = (PlantStructure._nextId || 0) + 1;
     this.dead = false;
     this.scale = clamp(scale || 1, 1, 10);
     const R = rng || Math.random;
@@ -2728,6 +2897,12 @@ class PlantStructure {
     };
     branch.leaves.push(leaf);
     if (branch.leaves.length >= branch.maxLeaves) branch.done = true;
+    // Bias the next chunk ejection from this branch's anchor node toward the
+    // direction the branch just grew. One-shot — cleared after the next eject.
+    if (branch.node) {
+      branch.node._lastGrowthAngle = ang;
+      branch.node._lastGrowthBias = 1;
+    }
     this._refreshFlatNodes();
     return true;
   }
@@ -2759,12 +2934,26 @@ class PlantStructure {
     }
 
     const T_now = performance.now() * 0.001;
-    const driftMul = this.connectedToRock ? 0.65 : 0.42;
-    this.x += drift.x * dt * driftMul;
-    this.y += drift.y * dt * driftMul;
+    // Water drag model for plant body: converge toward local flow velocity,
+    // then damp. Attached plants are much heavier/slower in current.
+    const driftMul = this.connectedToRock ? 0.16 : 0.42;
+    const targetVX = drift.x * driftMul;
+    const targetVY = drift.y * driftMul;
+    const dragK = this.connectedToRock ? 4.4 : 2.2;
+    const blend = 1 - Math.exp(-dragK * dt);
+    this.vx += (targetVX - this.vx) * blend;
+    this.vy += (targetVY - this.vy) * blend;
+    const plantDamp = Math.max(0, 1 - dt * (this.connectedToRock ? 1.25 : 0.5));
+    this.vx *= plantDamp;
+    this.vy *= plantDamp;
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
 
     if (this.connectedToRock && this.rootRock && this.rootRock.rock && !this.rootRock.rock._removed) {
       const rock = this.rootRock.rock;
+      // Attached systems share some velocity, but remain heavily damped.
+      this.vx = this.vx * 0.78 + rock.vx * 0.22;
+      this.vy = this.vy * 0.78 + rock.vy * 0.22;
       const tx = rock.x + this.rootRock.offsetX;
       const ty = rock.y + this.rootRock.offsetY;
       // Elastic tether: spring toward anchor point but still allows drift
@@ -2773,8 +2962,8 @@ class PlantStructure {
       const slack = rock.maxR * 0.8; // free range before spring activates
       if (tDist > slack) {
         const pull = Math.min(1, (tDist - slack) / (rock.maxR * 2));
-        this.x += (tdx / tDist) * pull * tDist * dt * 3.5;
-        this.y += (tdy / tDist) * pull * tDist * dt * 3.5;
+        this.vx += (tdx / tDist) * pull * 26 * dt;
+        this.vy += (tdy / tDist) * pull * 26 * dt;
       }
     }
 
@@ -2885,9 +3074,10 @@ class PlantStructure {
     for (const node of this.plantNodes) {
       if (!node.internalSlots.length) continue;
       const branchCount = node.internalSlots.length;
-      // Evenly distribute ejections: one full cycle = CHUNK_EJECT_CYCLE_SECONDS, split by branch count.
-      // e.g. 3 branches → eject every 3.33 s, cycling branch 0 → 1 → 2 → 0 ...
-      const period = PLANT_TUNE.CHUNK_EJECT_CYCLE_SECONDS / branchCount;
+      // Per spec: a node ejects (CHUNK_EJECT_CYCLE_SECONDS / branches) chunks
+      // over CHUNK_EJECT_CYCLE_SECONDS. Solving for period: each branch slot
+      // fires once every `branchCount` seconds. More branches → fewer chunks.
+      const period = Math.max(0.5, branchCount);
       if (node._ejectTimer === undefined) {
         node._ejectTimer = period * (this.rng ? this.rng() : Math.random()); // stagger start
         node._ejectBranchIdx = 0;
@@ -2936,7 +3126,16 @@ class PlantStructure {
     if (!game || typeof game.spawnFood !== 'function') return;
     // Eject outward along this slot's branch direction with a random spread.
     // Using slot.angle avoids the degenerate case where node === plant center (atan2 returns 0).
-    const a = (slot ? slot.angle : Math.random() * TAU) + (Math.random() - 0.5) * 1.1;
+    let a = (slot ? slot.angle : Math.random() * TAU) + (Math.random() - 0.5) * 1.1;
+    // One-shot bias toward the most recent branch growth on this node. After
+    // firing, the bias is cleared so subsequent ejections fall back to normal.
+    if (node._lastGrowthBias) {
+      const target = node._lastGrowthAngle;
+      // Shortest angular delta in (-PI, PI].
+      let diff = ((target - a + Math.PI * 3) % TAU) - Math.PI;
+      a += diff * 0.55;
+      node._lastGrowthBias = 0;
+    }
     const dist = node.r + 4;
     const x = node.x + Math.cos(a) * dist;
     const y = node.y + Math.sin(a) * dist;
@@ -2949,6 +3148,7 @@ class PlantStructure {
       f.linkOrigin = 'plant';
       f.relinkIntent = 0;
       f._sourcePlant = this;
+      f._sourcePlantId = this.structureId;
       f._sourceCooldown = 1.4;
       f._magneticDelay = PLANT_TUNE.CHUNK_MAGNETIC_DELAY; // delay before branch tips can attract this chunk
     }
@@ -2973,11 +3173,10 @@ class PlantStructure {
         if (o.type !== 'plant' && o.type !== 'meat') continue;
         // Skip chunks still in post-ejection magnetic delay — they drift freely first.
         if ((o._magneticDelay || 0) > 0) continue;
-        if (o._sourcePlant === this && (o._sourceCooldown || 0) > 0) {
-          o._sourceCooldown -= dt;
-          if (o._sourceCooldown <= 0) o._sourcePlant = null;
-          else continue;
-        }
+        // A branch must never feed on chunks emitted by its own plant’s nodes.
+        // The chunk's sourcePlant pointer outlives the cooldown specifically so
+        // we can enforce this rule for the chunk's entire lifetime.
+        if (o._sourcePlant === this) continue;
         const dx = tip.x - o.x;
         const dy = tip.y - o.y;
         const d2 = dx * dx + dy * dy;
@@ -3015,6 +3214,9 @@ class PlantStructure {
   }
 
   _tryGrabChunk(branch, chunk) {
+    // Final guard: this structure may never consume chunks emitted from its
+    // own node network, even if a caller forgets to prefilter candidates.
+    if (chunk && (chunk._sourcePlant === this || chunk._sourcePlantId === this.structureId)) return false;
     if (branch.done || branch.leaves.length >= branch.maxLeaves) { branch.done = true; return false; }
     chunk.dead = true;
     this._growBranch(branch, Math.random);
@@ -3025,6 +3227,12 @@ class PlantStructure {
   _checkSecondarySpawn(branch, game) {
     // Only main branches can sprout sub-branches; sub-branches cannot.
     if (!branch.isMain) return;
+    const G = window.GROWTH_THRESHOLDS || {};
+    const subTier = (G.subbranchTier != null) ? G.subbranchTier : PLANT_TUNE.SECONDARY_SPAWN_LEAF_MIN;
+    // Per spec: branches can only sprout sub-branches once they have reached
+    // tier `subbranchTier`, and only along segments above tier 2 (the area of
+    // the branch above the second growth tier).
+    if (branch.segments.length < subTier) return;
     // Cap at MAX_SECONDARY_PER_MAIN sub-branches per main branch.
     const existingSubs = this.branches.filter(b => b.parentBranch === branch).length;
     if (existingSubs >= PLANT_TUNE.MAX_SECONDARY_PER_MAIN) return;
@@ -3032,7 +3240,7 @@ class PlantStructure {
     const now = performance.now() * 0.001;
     if (branch._lastSecondaryT !== undefined && (now - branch._lastSecondaryT) < PLANT_TUNE.SECONDARY_BRANCH_COOLDOWN) return;
 
-    const minIdx = PLANT_TUNE.SECONDARY_SPAWN_LEAF_MIN;
+    const minIdx = Math.max(2, PLANT_TUNE.SECONDARY_SPAWN_LEAF_MIN);
     const maxIdx = Math.min(PLANT_TUNE.SECONDARY_SPAWN_LEAF_MAX, branch.segments.length - 1);
     if (maxIdx < minIdx) return;
     const grid = game.grid;
@@ -3044,7 +3252,8 @@ class PlantStructure {
       for (let j = 0; j < near.length; j++) {
         const o = near[j];
         if (!o || o.kind !== 'food' || o.dead || o.type !== 'plant') continue;
-        if (o._sourcePlant === this && (o._sourceCooldown || 0) > 0) continue;
+        // Secondary growth cannot consume chunks emitted by this same structure.
+        if (o._sourcePlant === this) continue;
         const dx = o.x - seg.x, dy = o.y - seg.y;
         if (dx * dx + dy * dy > 12 * 12) continue;
         const side = Math.random() < 0.5 ? -1 : 1;
@@ -3127,6 +3336,9 @@ class PlantStructure {
             offsetX: this.x - rock.x,
             offsetY: this.y - rock.y,
             anchorNode: branch.node,
+            // Store surface contact offset from rock center for drawing the tether.
+            anchorSurfOffX: tip.x - rock.x,
+            anchorSurfOffY: tip.y - rock.y,
           };
           this._emitGrowthFx(tip.x, tip.y, 1.0, 'rock');
           return;
@@ -3136,12 +3348,17 @@ class PlantStructure {
   }
 
   _updateCreatureInteractions(dt, entities) {
-    // Branches: hard collision (push creature out). Leaves: drag/slowdown (passable).
+    // Branches: hard collision below pushable tier; above tier they accept a
+    // small portion of the creature's momentum so they can be shoved aside.
+    const G = window.GROWTH_THRESHOLDS || {};
+    const pushableTier = (G.branchPushable != null) ? G.branchPushable : 3;
     const branchSlowFactor = Math.pow(PLANT_TUNE.CREATURE_BRANCH_SLOWDOWN, dt * 60);
     const leafSlowFactor   = Math.pow(PLANT_TUNE.CREATURE_LEAF_SLOWDOWN,   dt * 60);
     for (let ei = 0; ei < entities.length; ei++) {
       const e = entities[ei];
       if (!e || e.dead || e.r < 2) continue;
+      // A chunk emitted by this plant ignores its own structure entirely.
+      if (e.kind === 'food' && e._sourcePlant === this) continue;
       const erx = e.r + 60;
       const dxp = e.x - this.x, dyp = e.y - this.y;
       if (dxp * dxp + dyp * dyp > erx * erx + 360 * 360) continue;
@@ -3154,7 +3371,11 @@ class PlantStructure {
         const tdx = e.x - tip.x, tdy = e.y - tip.y;
         if (tdx * tdx + tdy * tdy > (e.r + 80) * (e.r + 80)) continue;
         // Branch segments: hard circle collision — push creature out.
+        // If the branch has grown to/past the pushable tier, the creature's
+        // impact also nudges the segment along the contact normal so larger
+        // plants can be physically jostled.
         const segR = 6;
+        const isPushable = branch.segments.length >= pushableTier;
         for (const seg of branch.segments) {
           const sdx = e.x - seg.x, sdy = e.y - seg.y;
           const dd = Math.hypot(sdx, sdy) || 0.001;
@@ -3165,6 +3386,12 @@ class PlantStructure {
             e.y += ny * overlap * 0.7;
             const velDot = e.vx * nx + e.vy * ny;
             if (velDot < 0) { e.vx -= nx * velDot * 0.55; e.vy -= ny * velDot * 0.55; }
+            if (isPushable && velDot < 0) {
+              // Transfer a fraction of inward momentum to the segment.
+              const push = -velDot * 0.18;
+              seg.vx -= nx * push;
+              seg.vy -= ny * push;
+            }
             touchedBranch = true;
           }
         }
@@ -3184,27 +3411,71 @@ class PlantStructure {
           }
         }
       }
+      // Central plant nodes are collidable until this specific entity can
+      // actually consume them. An entity “can consume” when it is a herb/omni
+      // with growthLevel ≥ plantNodeEat AND the plant has matured (≥10 leaves).
+      // Otherwise the node blocks the entity like a solid obstacle.
+      const nodePlantMaturity = this.branches.reduce((s, b) => s + b.leaves.length, 0);
+      const nodeEatTier = (G.plantNodeEat != null) ? G.plantNodeEat : 7;
+      const eDiet = e.diet;
+      const eGrowth = e.growthLevel || 0;
+      const canEatNode = (eDiet === 'herbivore' || eDiet === 'omnivore')
+        && eGrowth >= nodeEatTier && nodePlantMaturity >= 10;
+      if (!canEatNode) {
+        for (const n of this.plantNodes) {
+          const sdx = e.x - n.x, sdy = e.y - n.y;
+          const dd = Math.hypot(sdx, sdy) || 0.001;
+          const overlap = e.r + n.r - dd;
+          if (overlap > 0) {
+            const nx = sdx / dd, ny = sdy / dd;
+            e.x += nx * overlap;
+            e.y += ny * overlap;
+            const velDot = e.vx * nx + e.vy * ny;
+            if (velDot < 0) { e.vx -= nx * velDot * 0.85; e.vy -= ny * velDot * 0.85; }
+          }
+        }
+      }
       if (touchedBranch) { e.vx *= branchSlowFactor; e.vy *= branchSlowFactor; }
       if (touchedLeaf)   { e.vx *= leafSlowFactor;   e.vy *= leafSlowFactor;   }
     }
   }
 
-  // Herbivore eating: nibble the central node only. Leaves are obstacles, not food.
-  eatFrom(ex, ey, eaterR, game, minChunk = 0, impactVx = 0, impactVy = 0) {
-    let best = null, bestD2 = Infinity;
-    // Nodes are protected until the plant has grown at least 10 leaves.
-    const growthLevel = this.branches.reduce((s, b) => s + b.leaves.length, 0);
-    if (growthLevel >= 10) {
+  // Herbivore eating. `eaterGrowth` selects what can be consumed:
+  //   - plantLeafEat → leaves become edible (slower, lower yield)
+  //   - plantNodeEat → central node becomes edible (rich yield)
+  // Plant chunks (the ejected food entities) are gated separately at the
+  // caller; this function only handles parts attached to the structure.
+  eatFrom(ex, ey, eaterR, game, minChunk = 0, impactVx = 0, impactVy = 0, eaterGrowth = 9) {
+    const G = window.GROWTH_THRESHOLDS || {};
+    const canEatLeaves = eaterGrowth >= ((G.plantLeafEat != null) ? G.plantLeafEat : 3);
+    const canEatNode   = eaterGrowth >= ((G.plantNodeEat != null) ? G.plantNodeEat : 7);
+    let best = null, bestD2 = Infinity, bestKind = null;
+    // Nodes are protected until the plant has grown at least 10 leaves AND
+    // the eater is mature enough.
+    const plantMaturity = this.branches.reduce((s, b) => s + b.leaves.length, 0);
+    if (canEatNode && plantMaturity >= 10) {
       for (const n of this.plantNodes) {
         if (n.r < minChunk) continue;
         const d2 = dist2(ex, ey, n.x, n.y);
-        if (d2 < bestD2) { bestD2 = d2; best = n; }
+        if (d2 < bestD2) { bestD2 = d2; best = n; bestKind = 'node'; }
+      }
+    }
+    if (canEatLeaves) {
+      for (const branch of this.branches) {
+        for (const lf of branch.leaves) {
+          if (lf.dead || lf.r < minChunk * 0.6) continue;
+          const d2 = dist2(ex, ey, lf.x, lf.y);
+          if (d2 < bestD2) { bestD2 = d2; best = lf; bestKind = 'leaf'; }
+        }
       }
     }
     if (!best) return 0;
     const d = Math.sqrt(bestD2);
-    if (d > eaterR + best.r + 12) return 0;
-    const bite = Math.min(best.hp, 4);
+    const contact = bestKind === 'leaf' ? best.r * 1.1 : best.r + 12;
+    if (d > eaterR + contact) return 0;
+    // Leaves nibble slower (lower bite) than nodes \u2014 spec says they take more time than chunks.
+    const biteMax = bestKind === 'leaf' ? 1.6 : 4;
+    const bite = Math.min(best.hp, biteMax);
     best.hp -= bite;
     best.r = Math.max((best.baseR || best.r) * 0.55, best.r * 0.92);
     this._emitGrowthFx(best.x, best.y, Math.min(1.4, bite / 3), 'eat');
@@ -3240,18 +3511,55 @@ class PlantStructure {
     const fade = Math.min(1, this.life / 8);
     const INK = '#1a1024';
 
-    // Rock-anchor tether (drawn first, beneath stems).
+    // Rock-anchor tether — drawn as an organic root from rock surface to plant base.
     if (this.connectedToRock && this.rootRock && this.rootRock.rock && !this.rootRock.rock._removed) {
       const rock = this.rootRock.rock;
-      const sx = rock.x + ox, sy = rock.y + oy;
-      const px = this.x + ox, py = this.y + oy;
-      ctx.strokeStyle = INK;
-      ctx.lineWidth = 4.2;
-      ctx.globalAlpha = 0.6 * fade;
-      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(px, py); ctx.stroke();
-      ctx.strokeStyle = hslaCSS(this.hue - 24, 38, 28, 1);
-      ctx.lineWidth = 2.6;
-      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(px, py); ctx.stroke();
+      // Start at the stored surface contact point on the rock.
+      const rr = this.rootRock;
+      const ax = rock.x + (rr.anchorSurfOffX || 0) + ox;
+      const ay = rock.y + (rr.anchorSurfOffY || 0) + oy;
+      const bx = this.x + ox;
+      const by = this.y + oy;
+      const dx = bx - ax, dy = by - ay;
+      const d = Math.hypot(dx, dy) || 1;
+      const nx = -dy / d, ny = dx / d;
+      // Two control points give the vine a lazy S-curve sway.
+      const sway = Math.sin(T_now * 0.55 + this.flowPhase) * clamp(d * 0.14, 4, 22);
+      const c1x = ax + dx * 0.3 + nx * sway;
+      const c1y = ay + dy * 0.3 + ny * sway;
+      const c2x = ax + dx * 0.7 - nx * sway * 0.6;
+      const c2y = ay + dy * 0.7 - ny * sway * 0.6;
+      // Thick ink shadow
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = 'rgba(18,8,28,0.55)';
+      ctx.lineWidth = 4.8;
+      ctx.globalAlpha = fade;
+      ctx.beginPath(); ctx.moveTo(ax, ay);
+      ctx.bezierCurveTo(c1x, c1y, c2x, c2y, bx, by); ctx.stroke();
+      // Root fill — warm brown-green vine
+      ctx.strokeStyle = hslaCSS(this.hue - 30, 44, 26, 1);
+      ctx.lineWidth = 2.8;
+      ctx.beginPath(); ctx.moveTo(ax, ay);
+      ctx.bezierCurveTo(c1x, c1y, c2x, c2y, bx, by); ctx.stroke();
+      // Bright highlight seam
+      ctx.strokeStyle = hslaCSS(this.hue - 10, 55, 48, 0.45);
+      ctx.lineWidth = 1.0;
+      ctx.beginPath(); ctx.moveTo(ax, ay);
+      ctx.bezierCurveTo(c1x, c1y, c2x, c2y, bx, by); ctx.stroke();
+      // Small knot dots along the vine at 25% / 50% / 75%
+      for (const t of [0.25, 0.5, 0.75]) {
+        const mt = 1 - t;
+        const kx = mt*mt*mt*ax + 3*mt*mt*t*c1x + 3*mt*t*t*c2x + t*t*t*bx;
+        const ky = mt*mt*mt*ay + 3*mt*mt*t*c1y + 3*mt*t*t*c2y + t*t*t*by;
+        ctx.fillStyle = hslaCSS(this.hue - 24, 38, 34, 0.8);
+        ctx.beginPath(); ctx.arc(kx, ky, 2.1, 0, TAU); ctx.fill();
+      }
+      // Anchor pad where vine meets rock surface
+      ctx.fillStyle = hslaCSS(this.hue - 32, 34, 22, 0.9);
+      ctx.beginPath(); ctx.arc(ax, ay, 4.2, 0, TAU); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(ax, ay, 3.0, 0, TAU); ctx.stroke();
       ctx.globalAlpha = 1;
     }
 
@@ -3457,23 +3765,35 @@ class Rock {
     this.mass = this.maxR * this.maxR;
   }
 
-  update(dt) {
+  update(dt, flow = null, hasAttachedPlant = false) {
     this._driftT += dt;
-    // Slow sinusoidal wander — feels like underwater current nudging.
-    const ax = Math.cos(this.driftPhase + this._driftT * 0.27) * this.driftAmp * 0.55;
-    const ay = Math.sin(this.driftPhase * 1.3 + this._driftT * 0.21) * this.driftAmp * 0.55;
+    // Follow water current with drag-limited terminal speed.
+    const fx = flow ? flow.x : 0;
+    const fy = flow ? flow.y : 0;
+    const flowMul = hasAttachedPlant ? 0.14 : 0.36;
+    const targetVX = fx * flowMul;
+    const targetVY = fy * flowMul;
+    const dragK = hasAttachedPlant ? 3.8 : 1.6;
+    const blend = 1 - Math.exp(-dragK * dt);
+    this.vx += (targetVX - this.vx) * blend;
+    this.vy += (targetVY - this.vy) * blend;
+
+    // Slow sinusoidal wander layered over current-following.
+    const wanderMul = hasAttachedPlant ? 0.22 : 1;
+    const ax = Math.cos(this.driftPhase + this._driftT * 0.27) * this.driftAmp * 0.55 * wanderMul;
+    const ay = Math.sin(this.driftPhase * 1.3 + this._driftT * 0.21) * this.driftAmp * 0.55 * wanderMul;
     this.vx += ax * dt;
     this.vy += ay * dt;
-    const damp = Math.max(0, 1 - dt * 0.09);
+    const damp = Math.max(0, 1 - dt * (hasAttachedPlant ? 1.35 : 0.35));
     this.vx *= damp;
     this.vy *= damp;
-    const maxV = 28;
+    const maxV = hasAttachedPlant ? 10 : 28;
     const sp = Math.hypot(this.vx, this.vy);
     if (sp > maxV) { this.vx = this.vx / sp * maxV; this.vy = this.vy / sp * maxV; }
     this.x += this.vx * dt;
     this.y += this.vy * dt;
     this.angle += this.spin * dt;
-    this.spin *= Math.max(0, 1 - dt * 0.12);
+    this.spin *= Math.max(0, 1 - dt * (hasAttachedPlant ? 0.45 : 0.18));
     if (this.crevice) {
       this.crevice.cx += this.vx * dt;
       this.crevice.cy += this.vy * dt;
@@ -4651,6 +4971,51 @@ const Save = {
   }
 };
 
+const SoftSwimTuning = (() => {
+  // Body-deformation parameters for the three propulsion visuals. (Heading
+  // tracking lives in _advanceVisualHeading and reads no tuning fields.)
+  const defaults = {
+    finFreqBase: 1.20,
+    finFreqSpeed: 1.00,
+    finRearSweepBase: 0.010,
+    finRearSweepSpeed: 0.018,
+    finBend: 0.009,
+    finForwardSweep: 0.008,
+    pulseFreqBase: 1.50,
+    pulseFreqSpeed: 1.70,
+    pulseContractFwd: 0.12,
+    pulseRearJet: 0.010,
+    pulseForwardJet: 0.040,
+    wriggleFreqBase: 2.10,
+    wriggleFreqSpeed: 2.10,
+    // Wave amplitudes are multipliers on body radius.
+    wriggleAmpBase: 0.08,
+    wriggleAmpSpeed: 0.18,
+    wriggleTravel: 0.95,
+    wriggleForward: 0.020,
+    wriggleBend: 0.025,
+  };
+  let stored = {};
+  try {
+    stored = JSON.parse(localStorage.getItem('drift.softSwim.tuning') || '{}');
+  } catch (e) {}
+
+  const tuning = {};
+  for (const key in defaults) {
+    tuning[key] = (key in stored && typeof stored[key] === 'number') ? stored[key] : defaults[key];
+  }
+  tuning.defaults = defaults;
+  tuning.save = () => {
+    const out = {};
+    for (const key in defaults) out[key] = tuning[key];
+    try {
+      localStorage.setItem('drift.softSwim.tuning', JSON.stringify(out));
+    } catch (e) {}
+  };
+  return tuning;
+})();
+window.DriftSoftSwimTuning = SoftSwimTuning;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // GAME
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4682,6 +5047,7 @@ class Game {
     this.rng = Math.random;
     this.director = null;
     this.goals = null;
+    this.softSwimTuning = SoftSwimTuning;
     this._scratch = [];
     this.lastBiomeId = null;
     this.codexRecent = '';
@@ -4761,8 +5127,17 @@ class Game {
     });
     this.ui.setSoftCreatureStatus(this.softCreaturesEnabled(), this.softCreatures.length);
 
+    // ── Dev menu accordion (reduce on-screen complexity) ──────────────────
+    this._initDevAccordionUI();
+
+    // ── Main-game soft swim dev sliders ────────────────────────────────────
+    this._initSoftSwimDevUI();
+
     // ── Creature Stats dev sliders ──────────────────────────────────────────
     this._initCreatureStatsDevUI();
+
+    // ── Growth-threshold inputs ────────────────────────────────────────────
+    this._initGrowthThresholdsDevUI();
 
     // pre-fill seed from URL param or save
     const save = Save.load();
@@ -4844,11 +5219,7 @@ class Game {
     return !!window.DRIFT_USE_SOFT_CREATURES && !!window.DriftCreatures && typeof window.DriftCreatures.createCreature === 'function';
   }
 
-  softPrototypeAuthorityEnabled() {
-    return this.softCreaturesEnabled() && window.DRIFT_USE_SOFT_PROTOTYPE_AUTHORITY !== false;
-  }
-
-  // ── Controls rebinding helpers ─────────────────────────────────────────────
+// ── Controls rebinding helpers ─────────────────────────────────────────────
   _initRebindButtons() {
     const buttons = document.querySelectorAll('.bind-btn[data-action]');
     this._updateRebindLabels();
@@ -4886,7 +5257,197 @@ class Game {
     });
   }
 
+  _initDevAccordionUI() {
+    const grid = this.ui && this.ui.el && this.ui.el.devTools
+      ? this.ui.el.devTools.querySelector('.dev-grid')
+      : null;
+    if (!grid) return;
+
+    const blocks = Array.from(grid.querySelectorAll(':scope > .dev-block'));
+    if (!blocks.length) return;
+
+    const collapseOthers = (openBlock) => {
+      for (let i = 0; i < blocks.length; i++) {
+        const block = blocks[i];
+        const header = block.querySelector('h4');
+        const isOpen = block === openBlock;
+        block.classList.toggle('collapsed', !isOpen);
+        if (header) header.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+      }
+    };
+
+    for (let i = 0; i < blocks.length; i++) {
+      const block = blocks[i];
+      if (block.dataset.accordionReady === '1') continue;
+      const header = block.querySelector('h4');
+      if (!header) continue;
+
+      const body = document.createElement('div');
+      body.className = 'dev-block-body';
+      let node = header.nextSibling;
+      while (node) {
+        const next = node.nextSibling;
+        body.appendChild(node);
+        node = next;
+      }
+      block.appendChild(body);
+
+      block.classList.add('dev-collapsible');
+      const openByDefault = false;
+      block.classList.toggle('collapsed', !openByDefault);
+      header.setAttribute('role', 'button');
+      header.setAttribute('tabindex', '0');
+      header.setAttribute('aria-expanded', openByDefault ? 'true' : 'false');
+
+      const toggle = () => {
+        const shouldOpen = block.classList.contains('collapsed');
+        if (shouldOpen) collapseOthers(block);
+        else {
+          block.classList.add('collapsed');
+          header.setAttribute('aria-expanded', 'false');
+        }
+      };
+
+      header.addEventListener('click', toggle);
+      header.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          toggle();
+        }
+      });
+
+      block.dataset.accordionReady = '1';
+    }
+  }
+
   // ── Creature Stats dev panel ───────────────────────────────────────────────
+  _initSoftSwimDevUI() {
+    const tuning = this.softSwimTuning;
+    if (!tuning) return;
+
+    const rows = [
+      ['dev-fin-freq-base', 'dev-fin-freq-base-val', 'finFreqBase', v => v.toFixed(2)],
+      ['dev-fin-freq-speed', 'dev-fin-freq-speed-val', 'finFreqSpeed', v => v.toFixed(2)],
+      ['dev-fin-rear-sweep-base', 'dev-fin-rear-sweep-base-val', 'finRearSweepBase', v => v.toFixed(3)],
+      ['dev-fin-rear-sweep-speed', 'dev-fin-rear-sweep-speed-val', 'finRearSweepSpeed', v => v.toFixed(3)],
+      ['dev-fin-bend', 'dev-fin-bend-val', 'finBend', v => v.toFixed(3)],
+      ['dev-fin-forward-sweep', 'dev-fin-forward-sweep-val', 'finForwardSweep', v => v.toFixed(3)],
+      ['dev-pulse-freq-base', 'dev-pulse-freq-base-val', 'pulseFreqBase', v => v.toFixed(2)],
+      ['dev-pulse-freq-speed', 'dev-pulse-freq-speed-val', 'pulseFreqSpeed', v => v.toFixed(2)],
+      ['dev-pulse-contract-fwd', 'dev-pulse-contract-fwd-val', 'pulseContractFwd', v => v.toFixed(3)],
+      ['dev-pulse-rear-jet', 'dev-pulse-rear-jet-val', 'pulseRearJet', v => v.toFixed(3)],
+      ['dev-pulse-forward-jet', 'dev-pulse-forward-jet-val', 'pulseForwardJet', v => v.toFixed(3)],
+      ['dev-wriggle-freq-base',  'dev-wriggle-freq-base-val',  'wriggleFreqBase',  v => v.toFixed(2)],
+      ['dev-wriggle-freq-speed', 'dev-wriggle-freq-speed-val', 'wriggleFreqSpeed', v => v.toFixed(2)],
+      ['dev-wriggle-amp-base',   'dev-wriggle-amp-base-val',   'wriggleAmpBase',   v => v.toFixed(3)],
+      ['dev-wriggle-amp-speed',  'dev-wriggle-amp-speed-val',  'wriggleAmpSpeed',  v => v.toFixed(3)],
+      ['dev-wriggle-travel',     'dev-wriggle-travel-val',     'wriggleTravel',    v => v.toFixed(2)],
+      ['dev-wriggle-forward',    'dev-wriggle-forward-val',    'wriggleForward',   v => v.toFixed(3)],
+      ['dev-wriggle-bend',       'dev-wriggle-bend-val',       'wriggleBend',      v => v.toFixed(3)],
+    ];
+
+    const syncReadouts = () => {
+      for (const [sid, rid, key, fmt] of rows) {
+        const readout = document.getElementById(rid);
+        const slider = document.getElementById(sid);
+        if (readout) readout.textContent = fmt(tuning[key]);
+        if (slider) slider.value = tuning[key];
+      }
+    };
+
+    for (const [sid, rid, key, fmt] of rows) {
+      const slider = document.getElementById(sid);
+      const readout = document.getElementById(rid);
+      if (!slider) continue;
+      slider.addEventListener('input', () => {
+        const v = parseFloat(slider.value);
+        if (!Number.isFinite(v)) return;
+        tuning[key] = v;
+        if (readout) readout.textContent = fmt(v);
+        tuning.save();
+      });
+    }
+
+    const resetBtn = document.getElementById('dev-soft-swim-reset-btn');
+    if (resetBtn) {
+      resetBtn.addEventListener('click', () => {
+        for (const key in tuning.defaults) tuning[key] = tuning.defaults[key];
+        tuning.save();
+        syncReadouts();
+        this.ui.toast('SOFT SWIM · DEFAULTS RESTORED');
+      });
+    }
+
+    const copyBtn = document.getElementById('dev-soft-swim-copy-btn');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', () => {
+        const lines = [
+          '// ── Paste into SoftSwimTuning defaults in game.js ──',
+          `finFreqBase:      ${tuning.finFreqBase},`,
+          `finFreqSpeed:     ${tuning.finFreqSpeed},`,
+          `finRearSweepBase: ${tuning.finRearSweepBase},`,
+          `finRearSweepSpeed:${tuning.finRearSweepSpeed},`,
+          `finBend:          ${tuning.finBend},`,
+          `finForwardSweep:  ${tuning.finForwardSweep},`,
+          `pulseFreqBase:    ${tuning.pulseFreqBase},`,
+          `pulseFreqSpeed:   ${tuning.pulseFreqSpeed},`,
+          `pulseContractFwd: ${tuning.pulseContractFwd},`,
+          `pulseRearJet:     ${tuning.pulseRearJet},`,
+          `pulseForwardJet:  ${tuning.pulseForwardJet},`,
+          `wriggleFreqBase:  ${tuning.wriggleFreqBase},`,
+          `wriggleFreqSpeed: ${tuning.wriggleFreqSpeed},`,
+          `wriggleAmpBase:   ${tuning.wriggleAmpBase},`,
+          `wriggleAmpSpeed:  ${tuning.wriggleAmpSpeed},`,
+          `wriggleTravel:    ${tuning.wriggleTravel},`,
+          `wriggleForward:   ${tuning.wriggleForward},`,
+          `wriggleBend:      ${tuning.wriggleBend},`,
+        ];
+        const text = lines.join('\n');
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text)
+            .then(() => this.ui.toast('SOFT SWIM CONFIG COPIED'))
+            .catch(() => { console.log(text); this.ui.toast('SEE CONSOLE FOR SOFT SWIM CONFIG'); });
+        } else {
+          console.log(text);
+          this.ui.toast('SEE CONSOLE FOR SOFT SWIM CONFIG');
+        }
+      });
+    }
+
+    const origShow = this.ui.showDevTools.bind(this.ui);
+    this.ui.showDevTools = (on) => {
+      origShow(on);
+      if (on) syncReadouts();
+    };
+
+    syncReadouts();
+  }
+
+  // Growth-level threshold inputs. Each row binds a number input in
+  // index.html to a key on window.GROWTH_THRESHOLDS. Inputs are written
+  // live so other systems pick up the new value next frame.
+  _initGrowthThresholdsDevUI() {
+    const G = window.GROWTH_THRESHOLDS;
+    if (!G) return;
+    const rows = [
+      ['dev-growth-npc-mate',       'npcMateMin',     'NPC mating min growth'],
+      ['dev-growth-plant-chunk',    'plantChunkEat',  'Eat plant chunks at growth'],
+      ['dev-growth-plant-leaf',     'plantLeafEat',   'Eat plant leaves at growth'],
+      ['dev-growth-plant-node',     'plantNodeEat',   'Eat plant nodes at growth'],
+      ['dev-growth-branch-push',    'branchPushable', 'Branch tier becomes pushable'],
+      ['dev-growth-subbranch',      'subbranchTier',  'Branch tier for subbranching'],
+    ];
+    for (const [inputId, key] of rows) {
+      const input = document.getElementById(inputId);
+      if (!input) continue;
+      input.value = G[key];
+      input.addEventListener('input', () => {
+        const v = parseInt(input.value, 10);
+        if (Number.isFinite(v) && v >= 0 && v <= 9) G[key] = v;
+      });
+    }
+  }
+
   _initCreatureStatsDevUI() {
     const tuning = window.DriftCreatures && window.DriftCreatures.tuning;
     if (!tuning) return;
@@ -5050,6 +5611,20 @@ class Game {
     return 12;
   }
 
+  // NPC propulsion drives the visual style directly:
+  //   burst → pulse, glide/fin → fin, wriggle → wriggle
+  // Player has no propulsion field, so falls back to the genome hint.
+  _resolveSoftMovementStyle(source, style) {
+    if (source && source.propulsion) {
+      return source.propulsion === 'burst'   ? 'pulse'
+           : source.propulsion === 'wriggle' ? 'wriggle'
+           : 'fin';
+    }
+    return style === 'pulse' ? 'pulse'
+         : style === 'fin'   ? 'fin'
+         : 'wriggle';
+  }
+
   hslToSoftHex(h, s, l) {
     const hue = (((h % 360) + 360) % 360) / 360;
     const sat = clamp((s || 60) / 100, 0, 1);
@@ -5095,6 +5670,10 @@ class Game {
     const tier = Math.max(1, Math.min(3, (source.growthLevel || 0) + 1));
 
     const genome = D.generateCreatureGenome(genomeSeed, tier);
+
+    // Main game visuals only support three clear propulsion families.
+    // Normalize lab styles into: fin (glide), pulse (burst), wriggle (flappy).
+    genome.movement.style = this._resolveSoftMovementStyle(source, genome.movement.style);
 
     // Scale part sizes proportionally so the visual matches the source radius.
     const scaleRatio = (source.r * 0.92) / Math.max(1, genome.body.baseRadius);
@@ -5167,52 +5746,41 @@ class Game {
     visual.eatenMark   = p.eatenMark   || 0;
     visual.growthLevel = p.growthLevel || 0;
     visual._targetR    = p.r;
+    visual.genome.movement.style = this._resolveSoftMovementStyle(p, visual.genome.movement.style);
 
-    const [iax, iay] = Input.axis();
-    const k = this._computeSoftSwimHeading(visual, dt, p.vx || 0, p.vy || 0, iax, iay);
-    const speed = k.speed;
+    const speed = Math.hypot(p.vx || 0, p.vy || 0);
+    const tracked = this._advanceVisualHeading(visual, dt, p.angle, speed);
 
     for (let i = 0; i < visual.parts.length; i++) window.DriftCreatures.updateCreaturePart(visual.parts[i], dt);
-    this._swimBodyWave(visual, dt, k.heading, speed, k.turnRate, p.x, p.y);
+    this._swimBodyWave(visual, dt, tracked.heading, speed, tracked.turnRate, p.x, p.y);
   }
 
-  // Shared heading/turn solver for both player and NPC soft visuals.
-  // Uses velocity when moving, optional intent when nearly still, and hysteresis
-  // to prevent heading flicker around zero-speed.
-  _computeSoftSwimHeading(visual, dt, vx, vy, intentX, intentY) {
-    const speed = Math.hypot(vx || 0, vy || 0);
-    const prevH = Number.isFinite(visual.heading) ? visual.heading : Math.atan2(vy || 0, vx || 1);
-    const enterSpeed = 7.5;
-    const exitSpeed = 4.5;
-
-    if (speed >= enterSpeed) visual._swimMoving = true;
-    else if (speed <= exitSpeed) visual._swimMoving = false;
-    else if (typeof visual._swimMoving !== 'boolean') visual._swimMoving = speed > (enterSpeed + exitSpeed) * 0.5;
-
-    const im = Math.hypot(intentX || 0, intentY || 0);
-    const hasIntent = im > 0.12;
-
-    let targetHeading = prevH;
-    if (visual._swimMoving) {
-      targetHeading = Math.atan2(vy || 0, vx || 1);
-    } else if (hasIntent) {
-      targetHeading = Math.atan2(intentY, intentX);
+  // Single-source visual heading tracker. Both source.angle (player/NPC) and
+  // velocity are now smooth and consistent, so the visual just needs to chase
+  // source.angle at a rate-limited speed. The old two-stage solver (track
+  // velocity, then stabilize toward source.angle) pulled in opposite
+  // directions during turns and produced the "snap back and forth" rhythm.
+  _advanceVisualHeading(visual, dt, targetAngle, speed) {
+    const prevH = Number.isFinite(visual.heading) ? visual.heading : (Number.isFinite(targetAngle) ? targetAngle : 0);
+    if (!Number.isFinite(targetAngle)) {
+      return { heading: prevH, turnRate: visual.turnRate || 0 };
     }
-
-    let td = targetHeading - prevH;
-    while (td > Math.PI) td -= TAU;
-    while (td < -Math.PI) td += TAU;
-
-    const maxTurnPerSec = 2.1 + Math.min(1.7, speed * 0.017);
-    const maxTurnStep = maxTurnPerSec * Math.max(dt, 0.001);
-    const clampedTd = Math.max(-maxTurnStep, Math.min(maxTurnStep, td));
-    const heading = prevH + clampedTd;
-    const rawTurnRate = clampedTd / Math.max(dt, 0.001);
-
+    let delta = targetAngle - prevH;
+    while (delta >  Math.PI) delta -= TAU;
+    while (delta < -Math.PI) delta += TAU;
+    // Faster turn at speed so darts look reactive; floor so stopped creatures
+    // can still rotate.
+    const rateCap = 3.6 + Math.min(2.8, (speed || 0) * 0.04);
+    const maxStep = rateCap * Math.max(dt, 0.001);
+    const step = Math.max(-maxStep, Math.min(maxStep, delta));
+    const heading = prevH + step;
+    const rawTurnRate = step / Math.max(dt, 0.001);
     const prevTurn = Number.isFinite(visual.turnRate) ? visual.turnRate : 0;
-    const turnRate = prevTurn * 0.84 + rawTurnRate * 0.16;
-
-    return { heading, turnRate, speed };
+    // Light smoothing on the reported turnRate so the body's wave/bend term
+    // doesn't twitch frame-to-frame.
+    const turnKeep = 0.6;
+    const turnRate = prevTurn * turnKeep + rawTurnRate * (1 - turnKeep);
+    return { heading, turnRate };
   }
 
   drawSoftPlayer(ctx, w, h) {
@@ -5240,6 +5808,8 @@ class Game {
       return;
     }
 
+    this.ensureSoftPlayerCreature();
+
     for (let i = 0; i < this.creatures.length; i++) {
       const source = this.creatures[i];
       if (!source || source.dead) continue;
@@ -5247,12 +5817,13 @@ class Game {
       this.softCreatureLookup.set(source, visual);
       this.softCreatures.push(visual);
     }
-    this.ensureSoftPlayerCreature();
     this.ui.setSoftCreatureStatus(this.softCreaturesEnabled(), this.softCreatures.length);
   }
 
   ensureSoftCreatures() {
     if (!this.softCreaturesEnabled()) return;
+
+    this.ensureSoftPlayerCreature();
 
     const live = new Set();
     for (let i = 0; i < this.creatures.length; i++) {
@@ -5270,9 +5841,6 @@ class Game {
     for (const [source] of Array.from(this.softCreatureLookup.entries())) {
       if (!live.has(source)) this.softCreatureLookup.delete(source);
     }
-
-    this.ensureSoftPlayerCreature();
-
     this.ui.setSoftCreatureStatus(this.softCreaturesEnabled(), this.softCreatures.length);
   }
 
@@ -5311,15 +5879,16 @@ class Game {
     }
   }
 
-  // ── Kinematic Cell-Stage Locomotion (Spore-inspired) ───────────────────────
-  // Purely visual microbe motion: rhythmic power stroke, squash/stretch,
-  // perimeter ripple, and rear sweep. Both player and NPC visuals use this
-  // exact same mechanic to keep movement language consistent.
-  //
-  // This remains kinematic (no Verlet integration) so node positions are always
-  // stable and never collapse or spin due to physics solver artifacts.
+  // ── Kinematic Propulsion Profiles ───────────────────────────────────────────
+  // Shared solver for all soft visuals. The body nodes are positioned directly
+  // each frame (no Verlet), but the deformation profile changes by movement
+  // style so creatures visibly differ in how they swim:
+  //   • fin     → smooth gliding with restrained rear steering
+  //   • pulse   → squid/jelly-like contraction bursts
+  //   • wriggle → flexible tail/body undulation
   _swimBodyWave(visual, dt, heading, speed, turnRate, cx, cy) {
     visual.heading  = heading;
+    visual.turnRate = turnRate;
     visual.facing.x = Math.cos(heading);
     visual.facing.y = Math.sin(heading);
 
@@ -5329,27 +5898,46 @@ class Game {
     const body = visual.body;
     const N    = body.nodes.length;
     const elong = visual.genome.body.elongation || 1.0;
+    const style = (visual.genome && visual.genome.movement && visual.genome.movement.style) || 'wriggle';
+    const swimTuning = this.softSwimTuning || SoftSwimTuning;
 
     // Smoothly track source radius so growth doesn't snap visually.
     const R = visual._smoothR || visual.genome.body.baseRadius || 20;
     visual._smoothR = R + ((visual._targetR || R) - R) * Math.min(1, dt * 5.5);
 
-    // Stroke model: fast power stroke + slower recovery (cell/cilia feel).
     const normalSpeed = Math.min(1, speed / 100);
-    const strokeHz = 1.9 + normalSpeed * 2.0;
-    const strokePhase = visual.time * strokeHz * TAU + (visual.motionPhase || 0) * TAU;
-    const strokeSin = Math.sin(strokePhase);
-    const kick = Math.max(0, strokeSin);
-    const recover = Math.max(0, -strokeSin);
+    const motionPhase = (visual.motionPhase || 0) * TAU;
+    const bend = Math.max(-2.2, Math.min(2.2, turnRate || 0));
 
-    // Global squash/stretch through each stroke.
-    const stretchFwd = 1 + kick * 0.10 - recover * 0.04;
-    const stretchLat = 1 - kick * 0.08 + recover * 0.05;
-    const halfFwd = visual._smoothR * elong * stretchFwd;
-    const halfLat = visual._smoothR * stretchLat;
+    let halfFwd = visual._smoothR * elong;
+    let halfLat = visual._smoothR;
+    let pulseKick = 0;
+    let pulseRecover = 0;
+    let pulseFreq = 0;
+    let wriggleFreq = 0;
+    let wriggleAmp = 0;
+    let finFreq = 0;
 
-    // Turn curvature is intentionally damped to avoid twitching.
-    const bend = Math.max(-2.4, Math.min(2.4, turnRate || 0));
+    if (style === 'pulse') {
+      pulseFreq = swimTuning.pulseFreqBase + normalSpeed * swimTuning.pulseFreqSpeed;
+      const pulsePhase = visual.time * pulseFreq * TAU + motionPhase;
+      const pulseWave = Math.sin(pulsePhase);
+      pulseKick = Math.max(0, pulseWave);
+      pulseRecover = Math.max(0, -pulseWave);
+      halfFwd *= 1 + pulseKick * swimTuning.pulseContractFwd - pulseRecover * 0.05;
+      halfLat *= 1 - pulseKick * 0.10 + pulseRecover * 0.06;
+    } else if (style === 'fin') {
+      finFreq = swimTuning.finFreqBase + normalSpeed * swimTuning.finFreqSpeed;
+      const glidePhase = visual.time * finFreq * TAU + motionPhase;
+      halfFwd *= 1 + normalSpeed * 0.04 + Math.sin(glidePhase) * 0.012;
+      halfLat *= 1 - normalSpeed * 0.02 + Math.sin(glidePhase + HALF_PI) * 0.008;
+    } else {
+      wriggleFreq = swimTuning.wriggleFreqBase + normalSpeed * swimTuning.wriggleFreqSpeed;
+      wriggleAmp = visual._smoothR * (swimTuning.wriggleAmpBase + normalSpeed * swimTuning.wriggleAmpSpeed);
+      const wrigglePhase = visual.time * wriggleFreq * TAU + motionPhase;
+      halfFwd *= 1 + Math.sin(wrigglePhase) * 0.012;
+      halfLat *= 1 + Math.sin(wrigglePhase + HALF_PI) * 0.008;
+    }
 
     for (let i = 0; i < N; i++) {
       const angle = (i / N) * TAU;
@@ -5363,30 +5951,37 @@ class Game {
       // Normalized body position: 0 = head, 1 = tail.
       const bodyPos = (halfFwd - localFwd) / Math.max(1, 2 * halfFwd);
 
-      // Rear emphasis for sweep/turn and calmer head motion.
       const rearT    = Math.max(0, (bodyPos - 0.35) / 0.65);
       const headT    = 1 - bodyPos;
+      let styleLat = 0;
+      let localFwdAdj = localFwd;
 
-      // Perimeter ripple mimics cilia/metachronal motion around the membrane.
-      const rimPhase = angle * 1.8 - visual.time * (3.2 + normalSpeed * 1.5) + (visual.motionPhase || 0) * TAU;
-      const rimDisp = Math.sin(rimPhase) * visual._smoothR * (0.018 + normalSpeed * 0.032);
+      if (style === 'fin') {
+        const finPhaseLocal = visual.time * finFreq * TAU + motionPhase;
+        const bodyRoll = Math.sin(finPhaseLocal + angle * 0.7) * visual._smoothR * 0.004;
+        const rearSweep = Math.sin(finPhaseLocal - bodyPos * 1.7) * visual._smoothR * (swimTuning.finRearSweepBase + normalSpeed * swimTuning.finRearSweepSpeed) * Math.pow(rearT, 1.45);
+        const bendDisp = bend * visual._smoothR * swimTuning.finBend * rearT * rearT;
+        const glideLift = Math.sin(finPhaseLocal + HALF_PI) * visual._smoothR * 0.006 * headT;
+        styleLat = bodyRoll + rearSweep + bendDisp + glideLift;
+        localFwdAdj = localFwd + Math.sin(finPhaseLocal) * visual._smoothR * swimTuning.finForwardSweep * (0.20 + headT * 0.18);
+      } else if (style === 'pulse') {
+        const jetBias = pulseKick * pulseKick;
+        const rimPulse = Math.sin(angle * 2 + motionPhase) * visual._smoothR * (0.006 + pulseKick * 0.008);
+        const rearJet = Math.sin(angle) * visual._smoothR * swimTuning.pulseRearJet * jetBias * (0.35 + rearT * 0.5);
+        const bendDisp = bend * visual._smoothR * 0.007 * rearT;
+        const idleDrift = (1 - normalSpeed) * Math.sin(visual.time * 2.1 + angle * 1.4) * visual._smoothR * 0.004;
+        styleLat = rimPulse + rearJet + bendDisp + idleDrift;
+        localFwdAdj = localFwd - (pulseKick - pulseRecover * 0.35) * visual._smoothR * swimTuning.pulseForwardJet * (bodyPos - 0.5) * (0.55 + headT * 0.15);
+      } else {
+        const wavePhase = bodyPos * TAU * swimTuning.wriggleTravel - visual.time * wriggleFreq * TAU + motionPhase;
+        const waveDisp = Math.sin(wavePhase) * wriggleAmp * Math.pow(rearT, 0.9);
+        const bendDisp = bend * visual._smoothR * swimTuning.wriggleBend * rearT * rearT;
+        const idleWobble = (1 - normalSpeed) * Math.sin(visual.time * 2.6 + angle * 2.0) * visual._smoothR * 0.004;
+        styleLat = waveDisp + bendDisp + idleWobble;
+        localFwdAdj = localFwd + Math.sin(wavePhase + HALF_PI) * visual._smoothR * swimTuning.wriggleForward * rearT;
+      }
 
-      // Rear sweep provides directional swimming like a flexible tail region.
-      const sweepPhase = bodyPos * TAU * 0.86 - visual.time * (2.2 + normalSpeed * 1.25);
-      const rearSweep = Math.sin(sweepPhase) * visual._smoothR * (0.05 + normalSpeed * 0.08) * Math.pow(rearT, 1.25);
-
-      // Turning bends mostly the rear half and keeps face stable.
-      const bendDisp = bend * visual._smoothR * 0.020 * rearT * rearT;
-
-      // Tiny idle wobble keeps slow movers alive-looking instead of frozen.
-      const idleWobble = (1 - normalSpeed) * Math.sin(visual.time * 2.8 + angle * 2.1) * visual._smoothR * 0.012;
-
-      const totalLat = localLat + rimDisp + rearSweep + bendDisp + idleWobble;
-
-      // Fore/aft recoil: front and rear move opposite during power stroke,
-      // preserving center while giving a pulsing cell-stage feel.
-      const recoil = (kick - recover * 0.35) * visual._smoothR * 0.055;
-      const localFwdAdj = localFwd - recoil * (bodyPos - 0.5) * (0.45 + headT * 0.2);
+      const totalLat = localLat + styleLat;
 
       // Rotate body-local coords by heading into world space.
       // forward basis: (fx, fy)   lateral-left basis: (lx, ly) = (-fy, fx)
@@ -5415,58 +6010,21 @@ class Game {
     visual.growthPulse  = source.growthPulse || 0;
     visual.eatenMark    = source.eatenMark   || 0;
     visual._targetR     = source.r;
+    visual.genome.movement.style = this._resolveSoftMovementStyle(source, visual.genome.movement.style);
 
-    const k = this._computeSoftSwimHeading(visual, dt, source.vx || 0, source.vy || 0, 0, 0);
+    const speed = Math.hypot(source.vx || 0, source.vy || 0);
+    const tracked = this._advanceVisualHeading(visual, dt, source.angle, speed);
 
     for (let i = 0; i < visual.parts.length; i++) window.DriftCreatures.updateCreaturePart(visual.parts[i], dt);
-    this._swimBodyWave(visual, dt, k.heading, k.speed, k.turnRate, source.x, source.y);
+    this._swimBodyWave(visual, dt, tracked.heading, speed, tracked.turnRate, source.x, source.y);
   }
+
 
   updateSoftCreatures(dt) {
     if (!this.softCreaturesEnabled()) return;
 
     this.ensureSoftCreatures();
     this.ensureSoftPlayerCreature();
-
-    if (this.softPrototypeAuthorityEnabled()) {
-      const D = window.DriftCreatures;
-      const world = { food: this.foods, creatures: this.softCreatures };
-
-      for (let i = 0; i < this.softCreatures.length; i++) {
-        const visual = this.softCreatures[i];
-        const source = visual.sourceCreature;
-        if (!source || source.dead) continue;
-
-        // Lab prototype creature drives in-game creature motion/heading.
-        visual.update(dt, world, null);
-
-        const center = D.getBodyCenter(visual.body);
-        const prev = source._softPrevCenter || { x: source.x, y: source.y };
-        const invDt = 1 / Math.max(dt, 0.001);
-        source.vx = (center.x - prev.x) * invDt;
-        source.vy = (center.y - prev.y) * invDt;
-        source.x = center.x;
-        source.y = center.y;
-        source.angle = Math.atan2(visual.facing.y || 0, visual.facing.x || 0) || source.angle || 0;
-        source._softPrevCenter = { x: center.x, y: center.y };
-
-        visual.isLegendary = !!source.legendary;
-        visual.label = source.legendary ? source.name : '';
-        visual.hitFlash = source.hitFlash || 0;
-        visual.growthPulse = source.growthPulse || 0;
-        visual.eatenMark = source.eatenMark || 0;
-
-        const targetScale = Math.max(0.72, source.r / Math.max(1, visual.baseSourceRadius || source.r));
-        if (Math.abs(targetScale - visual.growth.currentScale) > 0.01) {
-          const lerped = visual.growth.currentScale + (targetScale - visual.growth.currentScale) * Math.min(1, dt * 4.2);
-          D.scaleSoftBody(visual.body, lerped / Math.max(0.01, visual.growth.currentScale));
-          visual.growth.currentScale = lerped;
-        }
-      }
-      this.syncSoftPlayerVisual(dt);
-      this._computeSoftActionFlags();
-      return;
-    }
 
     for (let i = 0; i < this.softCreatures.length; i++) {
       this.syncSoftCreatureVisual(this.softCreatures[i], dt);
@@ -5495,29 +6053,6 @@ class Game {
       for (let i = 0; i < this.softCreatures.length; i++) {
         this.softCreatures[i]._actionFlags = null;
       }
-    }
-  }
-
-  _computeSoftActionFlags() {
-    if (!this.player || this.player.dead || !this.softPlayer) {
-      for (let i = 0; i < this.softCreatures.length; i++) {
-        this.softCreatures[i]._actionFlags = null;
-      }
-      return;
-    }
-    const D = window.DriftCreatures;
-    const pCenter = D.getBodyCenter(this.softPlayer.body);
-    const pSize = this.player.r;
-    const spaceR = pSize * 2.5 + 45;
-    const eR     = pSize * 3.5 + 65;
-    const qR     = pSize * 4.5 + 80;
-    for (let i = 0; i < this.softCreatures.length; i++) {
-      const visual = this.softCreatures[i];
-      if (!visual.sourceCreature || visual.sourceCreature.dead) { visual._actionFlags = null; continue; }
-      const oc   = D.getBodyCenter(visual.body);
-      const dist = Math.hypot(oc.x - pCenter.x, oc.y - pCenter.y);
-      const af = { space: dist < spaceR, e: dist < eR, q: dist < qR };
-      visual._actionFlags = (af.space || af.e || af.q) ? af : null;
     }
   }
 
@@ -6010,6 +6545,10 @@ class Game {
     // physical separation to avoid overlap jitter and improve body collisions.
     this.resolveCreatureBodyCollisions();
 
+    // Same-species NPC reproduction. Cheap throttled scan; spawns offspring
+    // matching the parents' template/species.
+    this.updateNpcMating(dt);
+
     // foods drift
     for (let i = 0; i < this.foods.length; i++) this.foods[i].update(dt);
     // Plant chunks do not attract or link to each other — they drift freely.
@@ -6037,6 +6576,13 @@ class Game {
     const baseMag = Math.hypot(current.x, current.y) || 1;
     const tFlow = performance.now() * 0.001;
     const plantEntities = [...this.creatures, this.player];
+    // Loose plant chunks also interact physically with other plants (drag on
+    // leaves, hard collision on branch segments + uneaten nodes). Skip chunks
+    // emitted by the plant being updated — those should pass through freely.
+    for (let i = 0; i < this.foods.length; i++) {
+      const f = this.foods[i];
+      if (f && !f.dead && f.type === 'plant') plantEntities.push(f);
+    }
     for (let i = 0; i < this.plants.length; i++) {
       const pl = this.plants[i];
       const phase = (pl.flowPhase || 0) + dt * (0.35 + (pl.flowDrift || 0.8) * 0.4);
@@ -6062,7 +6608,7 @@ class Game {
       pl.update(dt, plantEntities, this, driftVec);
       if (this.player.diet === 'herbivore' || this.player.diet === 'omnivore') {
         const minPlantChunk = clamp(this.player.r * 0.16, 1.4, 12);
-        const gain = pl.eatFrom(this.player.x, this.player.y, this.player.r, this, minPlantChunk, this.player.vx, this.player.vy);
+        const gain = pl.eatFrom(this.player.x, this.player.y, this.player.r, this, minPlantChunk, this.player.vx, this.player.vy, this.player.growthLevel || 0);
         if (gain > 0) {
           const eff = this.player.diet === 'herbivore' ? 3.0 : 1.0;
           this.player.energy = Math.min(this.player.stats.energyMax, this.player.energy + gain * eff * dt * 4);
@@ -6095,8 +6641,12 @@ class Game {
     // eggs
     for (const egg of this.eggs) egg.update(dt);
 
-    // gentle ambient rock drift + sticking
-    for (const rock of this.rocks) rock.update(dt);
+    // Rock water-drag and attachment-aware drift.
+    for (const rock of this.rocks) {
+      const flow = this.getCurrentVectorAt(rock.x, rock.y);
+      const hasAttachedPlant = !!(rock._connectedPlant && !rock._connectedPlant.dead);
+      rock.update(dt, flow, hasAttachedPlant);
+    }
     this.resolveRockStickCollisions(dt);
 
     // rock collision — push all entities + plant branch segments (multi-pass)
@@ -6210,6 +6760,7 @@ class Game {
     const p = this.player;
     if (p.eatTimer > 0) return; // mid-consume, skip new hits
     const list = this.grid.query(p.x, p.y, p.r + 30, this._scratch);
+    let handledCreatureBounce = false;
     for (let i = 0; i < list.length; i++) {
       const e = list[i];
       const dx = e.x - p.x, dy = e.y - p.y;
@@ -6218,6 +6769,12 @@ class Game {
         if (d < p.r + e.r) {
           // diet gate for meat
           if (e.type === 'meat' && p.diet === 'herbivore') continue;
+          // growth gate for loose plant chunks (ejected from plant nodes).
+          if (e.type === 'plant') {
+            const G = window.GROWTH_THRESHOLDS || {};
+            const minG = (G.plantChunkEat != null) ? G.plantChunkEat : 7;
+            if ((p.growthLevel || 0) < minG) continue;
+          }
           const minChunk = clamp(p.r * 0.18, 2.0, 18.0);
           if (e.r < minChunk) continue;
           const sizeRatio = e.r / Math.max(4, p.r);
@@ -6230,6 +6787,7 @@ class Game {
           break;
         }
       } else if (e.kind === 'creature' && !e.dead) {
+        if (handledCreatureBounce) continue;
         const overlap = p.r + e.r * 0.85 - d;
         if (overlap > 0) {
           const canEat = p.r > e.r * 1.05;
@@ -6237,6 +6795,7 @@ class Game {
             if (p.diet === 'herbivore') {
               // herbivores don't attack prey; bounce by size
               this.applyBodyBounce(p, e, overlap, 0.05);
+              handledCreatureBounce = true;
               continue;
             }
             // start timed eat-kill
@@ -6246,6 +6805,7 @@ class Game {
             e.takeDamage(p.biteDamage, 'player', this);
             const dealt = Math.max(0, before - e.hp);
             this.applyBodyBounce(p, e, overlap, clamp(dealt / 45, 0, 0.65));
+            handledCreatureBounce = true;
             if (p.venomDPS > 0) e.applyVenom(p.venomDPS, p.venomDur);
             if (e.dead) {
               this.consumeCreature(e);
@@ -6260,11 +6820,13 @@ class Game {
               e.takeDamage(nibble, 'player', this);
               const dealt = Math.max(0, before - e.hp);
               this.applyBodyBounce(p, e, overlap, clamp(0.25 + dealt / 28, 0, 0.7));
+              handledCreatureBounce = true;
               p.bumpBiteCD = 0.35;
               if (e.dead) this.consumeCreature(e);
             } else {
               if (p.diet === 'herbivore') p.sayPolite();
               this.applyBodyBounce(p, e, overlap, 0.0);
+              handledCreatureBounce = true;
             }
           }
         }
@@ -6752,18 +7314,47 @@ class Game {
     const radius = PLANT_TUNE.CLUSTER_RADIUS;
     const required = PLANT_TUNE.CLUSTER_REQUIRED_CHUNKS;
     const reqTime = PLANT_TUNE.CLUSTER_REQUIRED_TIME;
+    // Cohesion pass: chunks within a larger neighborhood pull strongly toward
+    // each other so they actually meet the cluster radius. Without this,
+    // drifting chunks rarely accumulate enough density on their own.
+    const cohRadius = radius * 3.0;
+    const cohR2 = cohRadius * cohRadius;
+    const cohForce = 95;
+    for (let i = 0; i < foods.length; i++) {
+      const f = foods[i];
+      if (!f || f.dead || f.type !== 'plant') continue;
+      const near = this.grid.query(f.x, f.y, cohRadius, this._scratch);
+      let nx = 0, ny = 0, n = 0;
+      for (let j = 0; j < near.length; j++) {
+        const o = near[j];
+        if (!o || o === f || o.kind !== 'food' || o.dead || o.type !== 'plant') continue;
+        // Don't pull a chunk toward another chunk emitted by the same plant
+        // it just left — they should disperse first.
+        if (f._sourcePlant && f._sourcePlant === o._sourcePlant) continue;
+        const dx = o.x - f.x, dy = o.y - f.y;
+        const d2 = dx*dx + dy*dy;
+        if (d2 > cohR2 || d2 < 1) continue;
+        const inv = 1 / Math.sqrt(d2);
+        nx += dx * inv; ny += dy * inv; n++;
+      }
+      if (n > 0) {
+        f.vx += (nx / n) * cohForce * dt;
+        f.vy += (ny / n) * cohForce * dt;
+        // Mild damping during cohesion so chunks lose drift inertia and settle.
+        f.vx *= (1 - 0.8 * dt);
+        f.vy *= (1 - 0.8 * dt);
+      }
+    }
     const seen = new Set();
     for (let i = 0; i < foods.length; i++) {
       const f = foods[i];
       if (!f || f.dead || f.type !== 'plant') continue;
       if (seen.has(f)) continue;
-      if (f._sourceCooldown && f._sourceCooldown > 0) continue;
       const near = this.grid.query(f.x, f.y, radius, this._scratch);
       const group = [f];
       for (let j = 0; j < near.length; j++) {
         const o = near[j];
         if (!o || o === f || o.kind !== 'food' || o.dead || o.type !== 'plant') continue;
-        if (o._sourceCooldown && o._sourceCooldown > 0) continue;
         if (dist2(o.x, o.y, f.x, f.y) <= radius * radius) group.push(o);
         if (group.length >= required) break;
       }
@@ -6903,33 +7494,47 @@ class Game {
     const mb = Math.max(1, b.r * b.r);
     const msum = ma + mb;
     const soften = clamp(1 - damageReduction, 0.3, 1);
+    const penetration = Math.max(0, overlap - 0.6);
+    if (penetration <= 0) return;
 
-    const sepA = overlap * (mb / msum) * 0.5;
-    const sepB = overlap * (ma / msum) * 0.5;
+    const sepA = penetration * (mb / msum) * 0.36;
+    const sepB = penetration * (ma / msum) * 0.36;
     a.x -= nx * sepA;
     a.y -= ny * sepA;
     b.x += nx * sepB;
     b.y += ny * sepB;
 
-    // Smooth the response by damping closing normal velocity, then add a softer impulse.
+    // Dampen only while closing along the contact normal.
     const relVx = b.vx - a.vx;
     const relVy = b.vy - a.vy;
     const relN = relVx * nx + relVy * ny;
     if (relN < 0) {
-      const damp = Math.min(34, -relN * 0.62) * soften;
+      const damp = Math.min(20, -relN * 0.52) * soften;
       a.vx += nx * damp * (mb / msum);
       a.vy += ny * damp * (mb / msum);
       b.vx -= nx * damp * (ma / msum);
       b.vy -= ny * damp * (ma / msum);
+
+      // Small restitution only while closing; avoids ping-pong shaking.
+      const restitution = 0.10;
+      const j = -(1 + restitution) * relN;
+      const imp = Math.min(7.5, j * 0.16) * soften;
+      a.vx -= nx * imp * (mb / msum);
+      a.vy -= ny * imp * (mb / msum);
+      b.vx += nx * imp * (ma / msum);
+      b.vy += ny * imp * (ma / msum);
     }
 
-    const impulse = (16 + overlap * 0.95) * soften;
-    a.vx -= nx * impulse * (mb / msum);
-    a.vy -= ny * impulse * (mb / msum);
-    b.vx += nx * impulse * (ma / msum);
-    b.vy += ny * impulse * (ma / msum);
+    // Blend velocities slightly toward shared motion to suppress micro-oscillation.
+    const avgVx = (a.vx * ma + b.vx * mb) / msum;
+    const avgVy = (a.vy * ma + b.vy * mb) / msum;
+    const velStick = 0.09;
+    a.vx += (avgVx - a.vx) * velStick;
+    a.vy += (avgVy - a.vy) * velStick;
+    b.vx += (avgVx - b.vx) * velStick;
+    b.vy += (avgVy - b.vy) * velStick;
 
-    const tangentialDamp = 0.962;
+    const tangentialDamp = 0.982;
     a.vx *= tangentialDamp;
     a.vy *= tangentialDamp;
     b.vx *= tangentialDamp;
@@ -6947,7 +7552,10 @@ class Game {
         const dx = b.x - a.x;
         const dy = b.y - a.y;
         const d = Math.hypot(dx, dy);
-        const minD = a.r * 0.78 + b.r * 0.78;
+        // Collision radius matches the visual silhouette (source.r * 0.92)
+        // rather than the previous 0.78 — creatures were visibly overlapping
+        // each other because physics fired only at 78% of the rendered size.
+        const minD = a.r * 0.92 + b.r * 0.92;
         if (d >= minD) continue;
         const overlap = minD - d;
         this.applyBodyBounce(a, b, overlap, 0.22);
@@ -6979,11 +7587,31 @@ class Game {
       }
 
       if (c.diet === 'herbivore' || c.diet === 'omnivore') {
+        // Loose plant chunks (ejected from nodes / drifting in currents).
+        const chunkGate = (window.GROWTH_THRESHOLDS && window.GROWTH_THRESHOLDS.plantChunkEat != null)
+          ? window.GROWTH_THRESHOLDS.plantChunkEat : 7;
+        if ((c.growthLevel || 0) >= chunkGate) {
+          const nearbyFood = this.grid.query(c.x, c.y, c.r + 22, this._scratch);
+          for (const e of nearbyFood) {
+            if (e.kind !== 'food' || e.dead || e.type !== 'plant') continue;
+            if (e.r < minChunk * 0.7) continue;
+            const d = Math.hypot(e.x - c.x, e.y - c.y);
+            if (d > c.r + e.r + 2) continue;
+            e.dead = true;
+            c.hunger = Math.max(0, c.hunger - 0.30);
+            c.hp = Math.min(c.maxHP, c.hp + 2 + e.r * 1.2);
+            c.eatenMark = Math.min(1.2, c.eatenMark + 0.55);
+            c.growBy(1.8 + e.r * 0.7, this);
+            this.particles.burst(e.x, e.y, 3, { speed: 45, life: 0.35, r: 1.3, h: e.hue, s: 70, l: 65 });
+            break;
+          }
+        }
+
         for (const pl of this.plants) {
           if (pl.dead) continue;
           const d2 = dist2(c.x, c.y, pl.x, pl.y);
           if (d2 > 280 * 280) continue;
-          const gain = pl.eatFrom(c.x, c.y, c.r, this, minChunk, c.vx, c.vy);
+          const gain = pl.eatFrom(c.x, c.y, c.r, this, minChunk, c.vx, c.vy, c.growthLevel || 0);
           if (gain > 0) {
             c.hunger = Math.max(0, c.hunger - gain * 0.03 * dt * 8);
             c.hp = Math.min(c.maxHP, c.hp + gain * 0.02 * dt * 8);
@@ -7098,6 +7726,55 @@ class Game {
     return best;
   }
 
+  findPlantChunkTargetForCreature(creature, r, groupMode = false) {
+    if (!creature) return null;
+    const list = this.grid.query(creature.x, creature.y, r, this._scratch);
+    const chunkGate = (window.GROWTH_THRESHOLDS && window.GROWTH_THRESHOLDS.plantChunkEat != null)
+      ? window.GROWTH_THRESHOLDS.plantChunkEat : 7;
+    if ((creature.growthLevel || 0) < chunkGate) return null;
+
+    let herdX = creature.x;
+    let herdY = creature.y;
+    let herdN = 1;
+    if (groupMode) {
+      const nearby = this.grid.query(creature.x, creature.y, 240, this._scratch);
+      for (let i = 0; i < nearby.length; i++) {
+        const e = nearby[i];
+        if (e.kind !== 'creature' || e === creature || e.dead) continue;
+        if (e.diet !== creature.diet) continue;
+        if (Math.abs(e.r - creature.r) > creature.r * 0.7) continue;
+        herdX += e.x;
+        herdY += e.y;
+        herdN++;
+      }
+      herdX /= herdN;
+      herdY /= herdN;
+    }
+
+    let best = null;
+    let bestScore = Infinity;
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      if (!e || e.kind !== 'food' || e.dead || e.type !== 'plant') continue;
+      const d2 = dist2(e.x, e.y, creature.x, creature.y);
+      let crowd = 0;
+      const near = this.grid.query(e.x, e.y, 120, this._scratch);
+      for (let j = 0; j < near.length; j++) {
+        const o = near[j];
+        if (o.kind === 'creature' && !o.dead && o !== creature && (o.diet === 'herbivore' || o.diet === 'omnivore')) crowd++;
+      }
+      const herdBias = groupMode ? dist2(e.x, e.y, herdX, herdY) * 0.18 : 0;
+      // Prefer bigger chunks slightly because they satisfy hunger faster.
+      const sizeBias = 1 / Math.max(0.8, e.r);
+      const score = (d2 + herdBias) * (1 + crowd * 0.12) * sizeBias;
+      if (score < bestScore) {
+        bestScore = score;
+        best = e;
+      }
+    }
+    return best;
+  }
+
   findFoodTargetForCreature(creature, r, groupMode = false) {
     if (!creature) return null;
     if (creature.diet === 'carnivore') {
@@ -7105,17 +7782,96 @@ class Game {
     }
 
     if (creature.diet === 'herbivore') {
-      return this.findPlantTargetForCreature(creature, r, groupMode);
+      const chunk = this.findPlantChunkTargetForCreature(creature, r, groupMode);
+      const plant = this.findPlantTargetForCreature(creature, r, groupMode);
+      if (!chunk) return plant;
+      if (!plant) return chunk;
+      const cd2 = dist2(chunk.x, chunk.y, creature.x, creature.y);
+      const pd2 = dist2(plant.x, plant.y, creature.x, creature.y);
+      // Herbivores should strongly favor loose chunks when available.
+      return cd2 < pd2 * 1.75 ? chunk : plant;
     }
 
     // Omnivores can choose nearest viable source.
+    const chunk = this.findPlantChunkTargetForCreature(creature, r * 0.9, groupMode);
     const meat = this.findSafeFoodForCreature(creature, r) || this.findFood(creature.x, creature.y, r * 0.8, creature, false);
     const plant = this.findPlantTargetForCreature(creature, r, groupMode);
+    if (!meat && !plant) return chunk;
+    if (chunk && !meat) return chunk;
+    if (chunk && !plant) return chunk;
+    if (chunk && plant) {
+      const cd2 = dist2(chunk.x, chunk.y, creature.x, creature.y);
+      const pd2 = dist2(plant.x, plant.y, creature.x, creature.y);
+      if (cd2 < pd2 * 1.35) return chunk;
+    }
     if (!meat) return plant;
     if (!plant) return meat;
     const md2 = dist2(meat.x, meat.y, creature.x, creature.y);
     const pd2 = dist2(plant.x, plant.y, creature.x, creature.y);
     return pd2 < md2 * 1.15 ? plant : meat;
+  }
+
+  // ── NPC same-species reproduction ─────────────────────────────────────────
+  // Periodically scan for two adjacent same-species creatures that are both
+  // grown, healthy, and off-cooldown. Spawn one offspring matched to their
+  // template at growth level 0.
+  updateNpcMating(dt) {
+    this._npcMatingT = (this._npcMatingT || 0) + dt;
+    if (this._npcMatingT < 1.0) return; // throttle to ~once per second
+    this._npcMatingT = 0;
+    if (!this.creatures.length || this.creatures.length > 240) return; // population cap
+
+    const list = this.creatures;
+    const minGrowthLevel = (window.GROWTH_THRESHOLDS && window.GROWTH_THRESHOLDS.npcMateMin) || 3;
+    const range = 80;
+
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i];
+      if (!this._isMatingEligible(a, minGrowthLevel)) continue;
+      for (let j = i + 1; j < list.length; j++) {
+        const b = list[j];
+        if (!this._isMatingEligible(b, minGrowthLevel)) continue;
+        if (a.speciesTag !== b.speciesTag) continue;
+        if (a.templateId !== b.templateId) continue;
+        const d = Math.hypot(b.x - a.x, b.y - a.y);
+        if (d > range) continue;
+        this._spawnNpcOffspring(a, b);
+        a.mateCD = 60 + this.rng() * 30;
+        b.mateCD = 60 + this.rng() * 30;
+        break; // a is busy this tick
+      }
+    }
+    // Tick down cooldowns once per scan.
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].mateCD > 0) list[i].mateCD = Math.max(0, list[i].mateCD - 1.0);
+    }
+  }
+
+  _isMatingEligible(c, minGrowthLevel) {
+    if (!c || c.dead || c.legendary || c.isEscort) return false;
+    if ((c.growthLevel || 0) < minGrowthLevel) return false;
+    if ((c.mateCD || 0) > 0) return false;
+    if ((c.hp / c.maxHP) < 0.55) return false;
+    if (c.hunger > 0.75) return false;
+    return true;
+  }
+
+  _spawnNpcOffspring(a, b) {
+    const templ = CREATURE_TEMPLATES[a.templateId] || CREATURE_TEMPLATES.drifter;
+    const mx = (a.x + b.x) * 0.5;
+    const my = (a.y + b.y) * 0.5;
+    const child = new Creature(mx, my, templ, {
+      rng: this.rng,
+      hue: a.hue,
+      sizeOverride: Math.min(a.r, b.r) * 0.5,
+    });
+    child.diet = a.diet;
+    child.speciesTag = a.speciesTag;
+    child.growthLevel = 0;
+    child.bornAt = this.totalTime || 0;
+    child.name = genCreatureName(this.rng);
+    this.creatures.push(child);
+    this.particles.burst(mx, my, 8, { speed: 60, life: 0.7, r: 1.6, h: a.hue || 200, s: 70, l: 75 });
   }
 
   findCorpse(x, y, r) {
@@ -7254,8 +8010,11 @@ class Game {
       p.egg = null;
     }
 
-    // Spawn "old self" escort creature
-    const oldSelf = new Creature(p.x + 20, p.y, CREATURE_TEMPLATES.drifter, {
+    // Spawn "old self" escort creature whose template matches the player's
+    // creator-selected body shape so the offspring shares the player's
+    // species visually and mechanically.
+    const templ = templateForPlayerSpecies(p);
+    const oldSelf = new Creature(p.x + 20, p.y, templ, {
       rng: this.rng,
       hue: p.creatorHue !== undefined ? p.creatorHue : 195,
       sizeOverride: p.r,
@@ -7265,6 +8024,9 @@ class Game {
     oldSelf.isEscort = true;
     oldSelf.diet = p.diet;
     oldSelf.speciesTag = p.speciesTag;
+    // Match the player's growth level so the offspring is at the same
+    // developmental stage.
+    oldSelf.growthLevel = p.growthLevel || 0;
     p.escortA = oldSelf;
     this.creatures.push(oldSelf);
 
