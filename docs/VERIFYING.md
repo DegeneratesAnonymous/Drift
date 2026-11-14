@@ -1,11 +1,14 @@
 # Drift Lightweight Verification Checklist
 
+Note: The game now logs "Drift game started" to the console when initialized.
+
 Use this checklist after any change, especially if it touches launch, save, or replay flow.
 
 ## Minimum checks
 
 1. Open `home.html` and confirm the page renders without obvious console/runtime errors.
 2. Open `index.html` and confirm the intro/start UI renders and `game.js` loads.
+   - Look for the console message "Drift game started" when running the game locally.
 3. Confirm `home.html` still links to `index.html`.
 4. Confirm replay links still target `index.html?seed=...`.
 5. Confirm scoreboard data is still read from localStorage key `drift.micro-eco.v1`.
