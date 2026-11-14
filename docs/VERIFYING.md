@@ -1,5 +1,7 @@
 # Drift Lightweight Verification Checklist
 
+Note: The game now logs "Drift game started" to the console when initialized.
+
 Use this checklist after any change, especially if it touches launch, save, or replay flow.
 
 ## Minimum checks
