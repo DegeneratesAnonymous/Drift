@@ -1,4 +1,5 @@
 'use strict';
+console.log('Game has started');
 
 // ── Soft-creature system feature flag ─────────────────────────────────────────
 // Set to true to enable the new physics-based creature system alongside the
