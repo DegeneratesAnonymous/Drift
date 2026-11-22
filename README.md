@@ -2,6 +2,7 @@
 
 Drift is a static HTML/JavaScript procedural micro-ecosystem survival game.
 Each run is seedable and replayable, progression is survival-driven, and run history is saved locally in the browser.
+The game now exposes a version via `getVersion()` for debugging purposes.
 
 ## Runtime architecture
 
