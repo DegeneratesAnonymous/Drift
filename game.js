@@ -10,7 +10,7 @@ window.DRIFT_USE_SOFT_CREATURES = true;
 // which causes them to shoot across the map and swim independently of the game.
 
 function getVersion() { return "1.0.0"; }
-console.log(`DRIFT version ${getVersion()}`);
+console.log(`Drift game loaded, version: ${getVersion()}`);
 
 (() => {
 
